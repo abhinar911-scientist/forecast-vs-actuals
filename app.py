@@ -33,6 +33,106 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+
+def inject_dark_theme_css() -> None:
+    """Force a dark theme for all UI elements (Change 1).
+
+    A ``.streamlit/config.toml`` already sets the base dark theme; this CSS
+    guarantees consistent dark styling for widgets that the config alone
+    doesn't fully cover (multiselects, dropdown menus, the file uploader,
+    text inputs, tabs) and keeps text high-contrast/legible.
+    """
+    st.markdown(
+        """
+        <style>
+        /* ---- App background ---- */
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+            background-color: #0e1117;
+            color: #e6edf3;
+        }
+        [data-testid="stHeader"] { background: rgba(0,0,0,0); }
+
+        /* ---- Generic text ---- */
+        .stApp, .stMarkdown, label, p, span, div,
+        h1, h2, h3, h4, h5, h6 { color: #e6edf3; }
+        .stCaption, [data-testid="stCaptionContainer"] { color: #9aa4b2 !important; }
+
+        /* ---- Bordered containers / cards ---- */
+        [data-testid="stContainer"], div[data-testid="stVerticalBlockBorderWrapper"] {
+            background-color: #141925;
+            border-color: #2a3040 !important;
+        }
+
+        /* ---- Inputs: text, multiselect, selectbox, slider ---- */
+        [data-baseweb="input"], [data-baseweb="select"] > div,
+        [data-baseweb="base-input"], .stTextInput input, .stNumberInput input {
+            background-color: #1a1f2b !important;
+            color: #e6edf3 !important;
+            border-color: #2a3040 !important;
+        }
+        /* Multiselect selected "tags" */
+        [data-baseweb="tag"] {
+            background-color: #2d4b7a !important;
+            color: #ffffff !important;
+        }
+        /* Dropdown popover menu */
+        [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
+            background-color: #1a1f2b !important;
+            color: #e6edf3 !important;
+        }
+        [role="option"] { color: #e6edf3 !important; }
+        [role="option"]:hover { background-color: #2a3040 !important; }
+
+        /* ---- File uploader ---- */
+        [data-testid="stFileUploader"] section,
+        [data-testid="stFileUploaderDropzone"] {
+            background-color: #1a1f2b !important;
+            border: 1px dashed #3a4255 !important;
+            color: #e6edf3 !important;
+        }
+        [data-testid="stFileUploader"] * { color: #e6edf3 !important; }
+        [data-testid="stFileUploader"] button {
+            background-color: #2d4b7a !important;
+            color: #ffffff !important;
+            border: none !important;
+        }
+
+        /* ---- Buttons / download buttons ---- */
+        .stButton button, .stDownloadButton button, .stFormSubmitButton button {
+            background-color: #2d4b7a !important;
+            color: #ffffff !important;
+            border: 1px solid #3a5a8a !important;
+        }
+        .stButton button:hover, .stDownloadButton button:hover {
+            background-color: #3a5a8a !important;
+            border-color: #4da3ff !important;
+        }
+
+        /* ---- Tabs ---- */
+        .stTabs [data-baseweb="tab-list"] { border-bottom-color: #2a3040; }
+        .stTabs [data-baseweb="tab"] { color: #9aa4b2; }
+        .stTabs [aria-selected="true"] { color: #4da3ff !important; }
+
+        /* ---- Radio / checkbox labels ---- */
+        .stRadio label, .stCheckbox label { color: #e6edf3 !important; }
+
+        /* ---- Metric cards ---- */
+        [data-testid="stMetric"] {
+            background-color: #1a1f2b;
+            border: 1px solid #2a3040;
+            border-radius: 8px;
+            padding: 12px 14px;
+        }
+        [data-testid="stMetricValue"] { color: #e6edf3 !important; }
+        [data-testid="stMetricLabel"] { color: #9aa4b2 !important; }
+
+        /* ---- Dataframe ---- */
+        [data-testid="stDataFrame"] { background-color: #1a1f2b; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
@@ -84,6 +184,7 @@ def verify_credentials(username: str, password: str) -> bool:
 
 def render_login_screen() -> None:
     """Render the login form. Sets st.session_state['authenticated'] on success."""
+    inject_dark_theme_css()
     st.title("🔐 Forecast vs Actuals — Sign in")
     st.caption("Please sign in to access the dashboard.")
 
@@ -164,17 +265,88 @@ STAT_FORECAST_ALIASES = [
 HISTORY_SERIES = ["Sales History (kg)", "History For Forecast (kg)"]
 FORECAST_SERIES = ["Statistical Forecast (kg)", "Final Demand Plan Lag 1 (kg)"]
 
-# Visual style: cool/solid for History, warm/dashed for Forecast
+# Visual style: every series uses a SOLID line (Change 3). History and
+# Forecast are distinguished by colour family and marker, not by dashing.
 SERIES_STYLE = {
-    "Sales History (kg)":           {"color": "#1f77b4", "dash": "solid", "category": "History"},
-    "History For Forecast (kg)":    {"color": "#17a2b8", "dash": "solid", "category": "History"},
-    "Statistical Forecast (kg)":    {"color": "#ff7f0e", "dash": "dash",  "category": "Forecast"},
-    "Final Demand Plan Lag 1 (kg)": {"color": "#d62728", "dash": "dot",   "category": "Forecast"},
+    "Sales History (kg)":           {"color": "#4da3ff", "dash": "solid", "category": "History"},
+    "History For Forecast (kg)":    {"color": "#36cfc9", "dash": "solid", "category": "History"},
+    "Statistical Forecast (kg)":    {"color": "#ffa94d", "dash": "solid", "category": "Forecast"},
+    "Final Demand Plan Lag 1 (kg)": {"color": "#ff6b6b", "dash": "solid", "category": "Forecast"},
 }
 
-# Light tints for the History / Forecast background bands
-HISTORY_BAND_COLOR = "rgba(31, 119, 180, 0.07)"
-FORECAST_BAND_COLOR = "rgba(255, 127, 14, 0.07)"
+# ---------------------------------------------------------------------------
+# Dark theme palette (Change 1)
+# ---------------------------------------------------------------------------
+DARK_BG = "#0e1117"           # page background
+DARK_PANEL = "#1a1f2b"        # cards / panels
+DARK_GRID = "#2a3040"         # chart gridlines
+DARK_TEXT = "#e6edf3"         # primary text (high contrast on dark)
+DARK_MUTED = "#9aa4b2"        # secondary/muted text
+ACCENT = "#4da3ff"            # primary accent
+
+# History / Forecast background bands (tuned for a dark canvas)
+HISTORY_BAND_COLOR = "rgba(77, 163, 255, 0.10)"
+FORECAST_BAND_COLOR = "rgba(255, 169, 77, 0.10)"
+
+# Trend-line colours (Change 4)
+HISTORY_TREND_COLOR = "#82c91e"
+FORECAST_TREND_COLOR = "#f783ac"
+
+
+def dark_layout(fig: "go.Figure", **overrides) -> "go.Figure":
+    """Apply the shared dark-theme layout to a Plotly figure.
+
+    Keeps text light and legible on the dark canvas, adds an interactive
+    range slider + range-selector buttons, unified hover and spike lines.
+    Any keyword overrides are merged into update_layout.
+    """
+    base = dict(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=DARK_TEXT, size=13),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=DARK_PANEL, font_size=12,
+                        font_color=DARK_TEXT, bordercolor=DARK_GRID),
+        legend=dict(
+            orientation="h", yanchor="top", y=-0.32,
+            xanchor="center", x=0.5,
+            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT),
+        ),
+        margin=dict(t=70, l=60, r=30, b=120),
+    )
+    base.update(overrides)
+    fig.update_layout(**base)
+    fig.update_xaxes(
+        showgrid=True, gridcolor=DARK_GRID, zeroline=False,
+        showspikes=True, spikemode="across", spikethickness=1,
+        spikecolor=DARK_MUTED, color=DARK_TEXT,
+    )
+    fig.update_yaxes(
+        showgrid=True, gridcolor=DARK_GRID, zeroline=False,
+        color=DARK_TEXT, tickformat=",.0f",
+    )
+    return fig
+
+
+def add_time_controls(fig: "go.Figure") -> "go.Figure":
+    """Add an interactive range slider + quick range-selector buttons."""
+    fig.update_xaxes(
+        rangeslider=dict(visible=True, thickness=0.06,
+                         bgcolor=DARK_PANEL),
+        rangeselector=dict(
+            bgcolor=DARK_PANEL, activecolor=ACCENT,
+            font=dict(color=DARK_TEXT),
+            buttons=[
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(count=2, label="2y", step="year", stepmode="backward"),
+                dict(step="all", label="All"),
+            ],
+        ),
+        tickformat="%b %Y",
+    )
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +625,98 @@ def seasonal_iqr_outliers(
 
 
 # ---------------------------------------------------------------------------
+# Outlier detection & correction — IQR and Sigma methods (Change 2)
+# ---------------------------------------------------------------------------
+def detect_and_correct_outliers(
+    series_df: pd.DataFrame,
+    method: str = "IQR",
+    k: float = 1.5,
+    n_sigma: float = 3.0,
+) -> pd.DataFrame:
+    """Detect and correct outliers in a single time series.
+
+    Two statistically valid methods are supported:
+
+    * **IQR (Tukey's fences)** — compute Q1, Q3 and IQR = Q3 − Q1 over the
+      series. Points outside ``[Q1 − k·IQR, Q3 + k·IQR]`` are outliers. Each
+      outlier is corrected by replacing it with the series **median** (a
+      robust central estimate that is unaffected by the outliers it
+      replaces).
+    * **Sigma (z-score / empirical rule)** — compute the mean μ and standard
+      deviation σ. Points with ``|x − μ| > n_sigma·σ`` are outliers. Because
+      the ordinary mean/σ are themselves inflated by outliers, the bounds are
+      computed on a **robust, outlier-trimmed** basis: μ and σ are estimated
+      after excluding points beyond the median ± n_sigma·(1.4826·MAD). Each
+      outlier is corrected by replacing it with the (robust) mean.
+
+    Returns a DataFrame with a consistent schema:
+    Date, Value, Center, Lower, Upper, IsOutlier, Filtered.
+    ``Filtered`` is the cleansed series (outliers replaced, others unchanged).
+    """
+    cols = ["Date", "Value", "Center", "Lower", "Upper", "IsOutlier", "Filtered"]
+    if series_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    work = series_df[["Date", "Value"]].dropna(subset=["Date"]).copy()
+    work["Date"] = pd.to_datetime(work["Date"])
+    work = work.sort_values("Date").reset_index(drop=True)
+
+    vals = work["Value"].to_numpy(dtype="float64")
+    valid = vals[~np.isnan(vals)]
+
+    method_u = (method or "IQR").upper()
+
+    if valid.size == 0:
+        work["Center"] = np.nan
+        work["Lower"] = np.nan
+        work["Upper"] = np.nan
+        work["IsOutlier"] = False
+        work["Filtered"] = vals
+        return work[cols]
+
+    if method_u == "IQR":
+        q1, q3 = np.percentile(valid, [25, 75])
+        iqr = q3 - q1
+        lower = q1 - k * iqr
+        upper = q3 + k * iqr
+        center = float(np.median(valid))   # correction target (robust)
+    elif method_u == "SIGMA":
+        # Robust pre-pass to keep the mean/σ from being inflated by outliers.
+        med = float(np.median(valid))
+        mad = float(np.median(np.abs(valid - med)))
+        robust_sigma = 1.4826 * mad
+        if robust_sigma > 0:
+            keep = valid[np.abs(valid - med) <= n_sigma * robust_sigma]
+            if keep.size < 2:
+                keep = valid
+        else:
+            keep = valid
+        mu = float(np.mean(keep))
+        sigma = float(np.std(keep, ddof=1)) if keep.size > 1 else 0.0
+        lower = mu - n_sigma * sigma
+        upper = mu + n_sigma * sigma
+        center = mu                          # correction target
+    else:
+        raise ValueError(f"Unknown method: {method!r} (expected 'IQR' or 'Sigma')")
+
+    is_out = np.zeros(len(vals), dtype=bool)
+    filtered = vals.copy()
+    for i, v in enumerate(vals):
+        if np.isnan(v):
+            continue
+        if v < lower or v > upper:
+            is_out[i] = True
+            filtered[i] = center            # statistically valid correction
+
+    work["Center"] = center
+    work["Lower"] = lower
+    work["Upper"] = upper
+    work["IsOutlier"] = is_out
+    work["Filtered"] = filtered
+    return work[cols]
+
+
+# ---------------------------------------------------------------------------
 # Hampel filter — outlier detection AND correction
 # ---------------------------------------------------------------------------
 # Scale factor that makes the MAD a consistent estimator of the standard
@@ -567,6 +831,239 @@ def history_forecast_boundary(filtered: pd.DataFrame) -> Optional[pd.Timestamp]:
 
 
 # ---------------------------------------------------------------------------
+# Trend analysis (Change 4)
+# ---------------------------------------------------------------------------
+def fit_trend(dates: pd.Series, values: pd.Series) -> Optional[dict]:
+    """Fit a simple linear (OLS) trend to a time series.
+
+    Returns a dict with the fitted endpoint line, the slope expressed *per
+    month* and *per year*, the % change per year relative to the mean level,
+    and the R² goodness-of-fit. Returns None when there are too few points.
+    """
+    d = pd.DataFrame({"Date": pd.to_datetime(dates), "Value": values}).dropna()
+    d = d.sort_values("Date")
+    if len(d) < 2:
+        return None
+
+    # Convert dates to a month index so the slope is "per month".
+    t0 = d["Date"].min()
+    x = ((d["Date"].dt.year - t0.year) * 12
+         + (d["Date"].dt.month - t0.month)).to_numpy(dtype="float64")
+    y = d["Value"].to_numpy(dtype="float64")
+    if np.allclose(x, x[0]):
+        return None
+
+    slope, intercept = np.polyfit(x, y, 1)
+    y_hat = slope * x + intercept
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    mean_level = float(np.mean(y)) if np.mean(y) != 0 else np.nan
+    slope_per_year = slope * 12
+    pct_per_year = (slope_per_year / mean_level * 100) if mean_level and not np.isnan(mean_level) else np.nan
+
+    return {
+        "slope_per_month": float(slope),
+        "slope_per_year": float(slope_per_year),
+        "pct_per_year": float(pct_per_year) if not np.isnan(pct_per_year) else None,
+        "r2": float(r2),
+        "x": x, "dates": d["Date"].to_numpy(),
+        "fit_line": y_hat,
+        "mean_level": mean_level,
+    }
+
+
+def interpret_trend(hist_trend: Optional[dict],
+                    fcst_trend: Optional[dict]) -> Tuple[str, str]:
+    """Produce a plain-language interpretation comparing history vs forecast
+    trend. Returns (status, message) where status ∈ {ok, warn, info}."""
+    if hist_trend is None and fcst_trend is None:
+        return "info", "Not enough data to estimate a trend."
+    if hist_trend is None:
+        return "info", "Not enough Sales-History points to estimate a historical trend."
+    if fcst_trend is None:
+        return "info", "Not enough forecast points to estimate a forecast trend."
+
+    h = hist_trend["pct_per_year"]
+    f = fcst_trend["pct_per_year"]
+
+    def direction(p):
+        if p is None:
+            return "flat"
+        if p > 2:
+            return "rising"
+        if p < -2:
+            return "falling"
+        return "broadly flat"
+
+    hd, fd = direction(h), direction(f)
+    h_txt = f"{h:+.1f}%/yr" if h is not None else "n/a"
+    f_txt = f"{f:+.1f}%/yr" if f is not None else "n/a"
+
+    msg = (f"History is **{hd}** ({h_txt}); forecast is **{fd}** ({f_txt}). ")
+
+    if hd == fd:
+        status = "ok"
+        msg += ("The forecast follows the historical trend direction, which "
+                "suggests the trend assumption is consistent with the past.")
+    elif "flat" in hd and "flat" in fd:
+        status = "ok"
+        msg += "Both are broadly flat — the trend assumption looks consistent."
+    else:
+        status = "warn"
+        msg += ("The forecast trend direction **differs** from history. "
+                "Review whether this inflection is intended (e.g. a known "
+                "market change) or an artefact of the statistical model.")
+
+    # Flag implausibly steep forecast growth relative to history.
+    if h is not None and f is not None and abs(h) > 1e-6:
+        ratio = f / h if h != 0 else np.inf
+        if ratio > 3 and f > 0 and h > 0:
+            status = "warn"
+            msg += (" Note: the forecast grows much faster than history "
+                    f"(~{ratio:.1f}× the historical rate).")
+
+    return status, msg
+
+
+# ---------------------------------------------------------------------------
+# Seasonality analysis (Change 4)
+# ---------------------------------------------------------------------------
+def monthly_seasonality_profile(dates, values) -> Optional[pd.Series]:
+    """Return a length-12 seasonal index (mean-normalised) indexed by month
+    number 1..12, or None if insufficient data. A value of 1.10 means that
+    month runs ~10% above the series average."""
+    d = pd.DataFrame({"Date": pd.to_datetime(dates), "Value": values}).dropna()
+    if d.empty:
+        return None
+    d["Month"] = d["Date"].dt.month
+    monthly = d.groupby("Month")["Value"].mean()
+    overall = d["Value"].mean()
+    if overall is None or overall == 0 or np.isnan(overall):
+        return None
+    profile = monthly / overall
+    return profile.reindex(range(1, 13))
+
+
+def seasonality_analysis(sales_hist: pd.DataFrame,
+                         forecast: pd.DataFrame,
+                         boundary: Optional[pd.Timestamp],
+                         n_years: int = 3) -> dict:
+    """Compare the year-over-year seasonal shape of the last ``n_years`` of
+    Sales History against the forecast period.
+
+    Returns a dict with per-month profiles and a correlation that measures
+    how closely the forecast's seasonal shape matches recent history.
+    """
+    out = {
+        "hist_profile": None,
+        "fcst_profile": None,
+        "per_year": {},      # year -> length-12 profile (history)
+        "correlation": None,
+        "n_hist_years": 0,
+    }
+
+    if sales_hist.empty:
+        return out
+
+    sh = sales_hist.dropna(subset=["Value"]).copy()
+    sh["Date"] = pd.to_datetime(sh["Date"])
+    if boundary is not None:
+        sh = sh[sh["Date"] <= boundary]
+    sh = sh[sh["Value"] != 0]
+    if sh.empty:
+        return out
+
+    # Restrict to the last n_years complete-ish years of history.
+    last_year = sh["Date"].dt.year.max()
+    recent_years = sorted(
+        [y for y in sh["Date"].dt.year.unique() if y > last_year - n_years]
+    )
+    out["n_hist_years"] = len(recent_years)
+    sh_recent = sh[sh["Date"].dt.year.isin(recent_years)]
+
+    out["hist_profile"] = monthly_seasonality_profile(
+        sh_recent["Date"], sh_recent["Value"])
+    for y in recent_years:
+        yr = sh_recent[sh_recent["Date"].dt.year == y]
+        out["per_year"][int(y)] = monthly_seasonality_profile(yr["Date"], yr["Value"])
+
+    if forecast is not None and not forecast.empty:
+        fc = forecast.dropna(subset=["Value"]).copy()
+        fc["Date"] = pd.to_datetime(fc["Date"])
+        if boundary is not None:
+            fc = fc[fc["Date"] > boundary]
+        fc = fc[fc["Value"] != 0]
+        out["fcst_profile"] = monthly_seasonality_profile(fc["Date"], fc["Value"])
+
+    # Correlate the two seasonal shapes where both are defined.
+    hp, fp = out["hist_profile"], out["fcst_profile"]
+    if hp is not None and fp is not None:
+        both = pd.concat([hp.rename("h"), fp.rename("f")], axis=1).dropna()
+        if len(both) >= 3 and both["h"].std() > 0 and both["f"].std() > 0:
+            out["correlation"] = float(both["h"].corr(both["f"]))
+
+    return out
+
+
+def interpret_seasonality(analysis: dict) -> Tuple[str, str]:
+    """Plain-language interpretation of the seasonality comparison.
+    Returns (status, message)."""
+    hp = analysis.get("hist_profile")
+    fp = analysis.get("fcst_profile")
+    corr = analysis.get("correlation")
+
+    if hp is None:
+        return "info", "Not enough historical data to estimate seasonality."
+    if fp is None:
+        return "info", ("No forecast values available to compare seasonality "
+                        "against history.")
+
+    # Strength of seasonality = spread of the index around 1.0.
+    hist_amp = float(np.nanstd(hp.values))
+    fcst_amp = float(np.nanstd(fp.values))
+
+    peak_month = int(hp.idxmax())
+    trough_month = int(hp.idxmin())
+    mname = lambda m: pd.Timestamp(2000, m, 1).strftime("%B")
+
+    # Special case: forecast is essentially flat (no seasonal shape) so a
+    # correlation can't be computed. If history IS seasonal, that's a problem.
+    if corr is None:
+        if hist_amp > 0.05 and fcst_amp <= 0.02:
+            return "warn", (
+                "The forecast is essentially **flat** (no seasonal shape), "
+                f"while history is seasonal — peaking around **{mname(peak_month)}** "
+                f"and troughing around **{mname(trough_month)}**. The forecast "
+                "does not reproduce the historical seasonality; review whether "
+                "it should.")
+        return "info", ("Couldn't compute a seasonality correlation (the "
+                        "seasonal shape may be flat or too sparse).")
+
+    if corr >= 0.7:
+        status = "ok"
+        verdict = ("strongly matches recent history — the forecast preserves "
+                   "the historical seasonal pattern")
+    elif corr >= 0.3:
+        status = "warn"
+        verdict = ("only partially matches recent history — some seasonal "
+                   "structure is preserved but there are notable differences")
+    else:
+        status = "warn"
+        verdict = ("does **not** match recent history — the forecast's "
+                   "seasonal shape diverges from the last few years")
+
+    msg = (f"Seasonality correlation **{corr:+.2f}**: the forecast {verdict}. "
+           f"Historically, demand peaks around **{mname(peak_month)}** and "
+           f"troughs around **{mname(trough_month)}**.")
+    if status == "warn":
+        msg += (" If the business is genuinely seasonal, review whether the "
+                "forecast should better reflect this shape.")
+    return status, msg
+
+
+# ---------------------------------------------------------------------------
 # Reset on file removal
 # ---------------------------------------------------------------------------
 def reset_app_state() -> None:
@@ -625,20 +1122,20 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
     boundary = history_forecast_boundary(filtered)
     bcol1, bcol2 = st.columns(2)
     bcol1.markdown(
-        "<div style='background:rgba(31,119,180,0.10); padding:10px 14px;"
-        " border-left:4px solid #1f77b4; border-radius:4px;'>"
-        "<b>📘 History</b><br>"
-        "<span style='font-size:0.85em; color:#444;'>"
+        "<div style='background:rgba(77,163,255,0.12); padding:10px 14px;"
+        " border-left:4px solid #4da3ff; border-radius:4px;'>"
+        "<b style='color:#e6edf3;'>📘 History</b><br>"
+        "<span style='font-size:0.85em; color:#9aa4b2;'>"
         "Solid lines · Sales History, History For Forecast"
         "</span></div>",
         unsafe_allow_html=True,
     )
     bcol2.markdown(
-        "<div style='background:rgba(255,127,14,0.10); padding:10px 14px;"
-        " border-left:4px solid #ff7f0e; border-radius:4px;'>"
-        "<b>📕 Forecast</b><br>"
-        "<span style='font-size:0.85em; color:#444;'>"
-        "Dashed lines · Statistical Forecast, Final Demand Plan Lag 1"
+        "<div style='background:rgba(255,169,77,0.12); padding:10px 14px;"
+        " border-left:4px solid #ffa94d; border-radius:4px;'>"
+        "<b style='color:#e6edf3;'>📕 Forecast</b><br>"
+        "<span style='font-size:0.85em; color:#9aa4b2;'>"
+        "Solid lines · Statistical Forecast, Final Demand Plan Lag 1"
         "</span></div>",
         unsafe_allow_html=True,
     )
@@ -648,6 +1145,15 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
             f"**{boundary.strftime('%b %Y')}** "
             "(last month with Sales History data)."
         )
+
+    # ---- Trend toggle -------------------------------------------------------
+    show_trend = st.checkbox(
+        "📈 Show trend lines (history & forecast)", value=True,
+        key="dash::show_trend",
+        help="Fits a linear trend separately to the history and forecast "
+             "periods so you can see whether the forecast follows the "
+             "historical trajectory.",
+    )
 
     # ---- Pivot & line chart -------------------------------------------------
     pivot = (
@@ -668,18 +1174,18 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
                 x0=x_min, x1=boundary,
                 fillcolor=HISTORY_BAND_COLOR, line_width=0, layer="below",
                 annotation_text="History", annotation_position="top left",
-                annotation_font=dict(color="#1f77b4", size=12),
+                annotation_font=dict(color="#4da3ff", size=12),
             )
         if x_max >= boundary:
             fig.add_vrect(
                 x0=boundary, x1=x_max,
                 fillcolor=FORECAST_BAND_COLOR, line_width=0, layer="below",
                 annotation_text="Forecast", annotation_position="top right",
-                annotation_font=dict(color="#ff7f0e", size=12),
+                annotation_font=dict(color="#ffa94d", size=12),
             )
-        fig.add_vline(x=boundary, line=dict(color="#888", width=1, dash="dot"))
+        fig.add_vline(x=boundary, line=dict(color=DARK_MUTED, width=1, dash="dot"))
 
-    # One trace per Data series, grouped in legend by category
+    # One trace per Data series — all SOLID (Change 3), distinguished by colour
     ordered = [s for s in HISTORY_SERIES + FORECAST_SERIES if s in pivot.columns]
     for col in ordered:
         style = SERIES_STYLE.get(
@@ -689,7 +1195,8 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
             go.Scatter(
                 x=pivot.index, y=pivot[col],
                 name=col, mode="lines+markers",
-                line=dict(color=style["color"], width=2.4, dash=style["dash"]),
+                line=dict(color=style["color"], width=2.6, dash="solid",
+                          shape="spline", smoothing=0.5),
                 marker=dict(size=6,
                             symbol="circle" if style["category"] == "History" else "diamond"),
                 legendgroup=style["category"],
@@ -702,37 +1209,77 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
             )
         )
 
-    fig.update_layout(
+    # ---- Trend lines (Change 4) --------------------------------------------
+    hist_trend = fcst_trend = None
+    if boundary is not None:
+        sales_series = (filtered[filtered["Data"] == SALES_HISTORY_LABEL]
+                        .dropna(subset=["Value"]))
+        sales_series = sales_series[sales_series["Date"] <= boundary]
+        sales_grp = sales_series.groupby("Date")["Value"].sum()
+        hist_trend = fit_trend(sales_grp.index, sales_grp.values)
+
+        fcst_series = (filtered[filtered["Data"] == STAT_FORECAST_LABEL]
+                       .dropna(subset=["Value"]))
+        fcst_series = fcst_series[fcst_series["Date"] > boundary]
+        fcst_grp = fcst_series.groupby("Date")["Value"].sum()
+        fcst_trend = fit_trend(fcst_grp.index, fcst_grp.values)
+
+    if show_trend:
+        if hist_trend is not None:
+            fig.add_trace(go.Scatter(
+                x=hist_trend["dates"], y=hist_trend["fit_line"],
+                mode="lines", name="History trend",
+                line=dict(color=HISTORY_TREND_COLOR, width=2.4, dash="dash"),
+                legendgroup="Trend", legendgrouptitle_text="Trend",
+                hovertemplate="History trend<br>%{x|%b %Y}<br>%{y:,.0f} kg<extra></extra>",
+            ))
+        if fcst_trend is not None:
+            fig.add_trace(go.Scatter(
+                x=fcst_trend["dates"], y=fcst_trend["fit_line"],
+                mode="lines", name="Forecast trend",
+                line=dict(color=FORECAST_TREND_COLOR, width=2.4, dash="dash"),
+                legendgroup="Trend", legendgrouptitle_text="Trend",
+                hovertemplate="Forecast trend<br>%{x|%b %Y}<br>%{y:,.0f} kg<extra></extra>",
+            ))
+
+    dark_layout(
+        fig,
         title="Forecast v/s Actuals",
         xaxis_title="Months", yaxis_title="Demand volume in kgs",
-        hovermode="x unified",
+        height=560,
         legend=dict(
-            orientation="h",
-            yanchor="top", y=-0.18,
-            xanchor="center", x=0.5,
-            groupclick="toggleitem",
+            orientation="h", yanchor="top", y=-0.36,
+            xanchor="center", x=0.5, groupclick="toggleitem",
+            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT),
         ),
-        height=560, margin=dict(t=70, l=60, r=30, b=140),
-        template="plotly_white",
+        margin=dict(t=70, l=60, r=30, b=150),
     )
-    fig.update_xaxes(tickformat="%b %Y", showgrid=True, gridcolor="#eee")
-    fig.update_yaxes(showgrid=True, gridcolor="#eee", tickformat=",.0f")
+    add_time_controls(fig)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+    # ---- Trend interpretation ----------------------------------------------
+    if show_trend:
+        status, message = interpret_trend(hist_trend, fcst_trend)
+        st.markdown("#### 🧭 Trend interpretation")
+        if status == "ok":
+            st.success(message)
+        elif status == "warn":
+            st.warning(message)
+        else:
+            st.info(message)
 
 
 # ---------------------------------------------------------------------------
 # UI – Tab 2: Outlier Detection & Correction (Hampel filter)
 # ---------------------------------------------------------------------------
 def render_outlier_tab(long_df: pd.DataFrame) -> None:
-    st.subheader("🚨 Outlier Detection & Correction — Hampel Filter")
+    st.subheader("🚨 Outlier Detection & Correction")
     st.caption(
-        "Outliers are detected and **corrected** on **Sales History (kg)** "
-        "using the Hampel filter: a centred rolling window flags points more "
-        "than *n·σ* (robust, MAD-based) from the local median, and replaces "
-        "each flagged point with that median to produce the **Hampel filter "
-        "cleansed history**. *History For Forecast (kg)* is shown unchanged "
-        "for comparison."
+        "Detect and **correct** outliers on **Sales History (kg)**. Choose a "
+        "method below. Both the original history and the cleansed history "
+        "(after correction) are shown. *History For Forecast (kg)* is shown "
+        "unchanged for comparison."
     )
 
     sales = long_df[long_df["Data"] == SALES_HISTORY_LABEL].copy()
@@ -761,35 +1308,50 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         f"covering **{sales_f['Key'].nunique():,}** Keys"
     )
 
-    cfg1, cfg2 = st.columns(2)
-    with cfg1:
-        window_size = st.slider(
-            "Window half-width", min_value=1, max_value=12, value=5, step=1,
-            help="Half-width of the centred rolling window. The full window "
-                 "spans 2×(this)+1 points. Larger windows smooth more.",
-            key="outlier::window",
+    # ---- Method selection (Change 2) ---------------------------------------
+    mcol, pcol = st.columns([1, 1.3])
+    with mcol:
+        method = st.radio(
+            "Detection & correction method",
+            options=["IQR", "Sigma"],
+            horizontal=True,
+            key="outlier::method",
+            help="IQR uses Tukey's fences (Q1−k·IQR / Q3+k·IQR) and corrects "
+                 "to the median. Sigma uses mean ± n·σ (robustly estimated) "
+                 "and corrects to the mean.",
         )
-    with cfg2:
-        n_sigma = st.slider(
-            "n_sigma (threshold)", min_value=1.0, max_value=5.0,
-            value=3.0, step=0.5,
-            help="Tolerance in robust (MAD-based) standard deviations. "
-                 "Larger values flag fewer points. The Hampel default is 3.0.",
-            key="outlier::nsigma",
-        )
+    with pcol:
+        if method == "IQR":
+            param = st.slider(
+                "IQR multiplier (k)", min_value=0.5, max_value=3.0,
+                value=1.5, step=0.1,
+                help="Tukey's rule uses 1.5; larger values flag fewer points.",
+                key="outlier::k",
+            )
+            k_val, sigma_val = param, 3.0
+        else:
+            param = st.slider(
+                "Sigma threshold (n)", min_value=1.0, max_value=4.0,
+                value=3.0, step=0.5,
+                help="Points beyond mean ± n·σ are outliers. 3σ is typical.",
+                key="outlier::nsigma",
+            )
+            k_val, sigma_val = 1.5, param
 
-    @st.cache_data(show_spinner="Running Hampel filter across all Keys…")
-    def compute_all(sales_in: pd.DataFrame, window_in: int, nsigma_in: float) -> pd.DataFrame:
+    @st.cache_data(show_spinner="Detecting & correcting outliers across all Keys…")
+    def compute_all(sales_in: pd.DataFrame, method_in: str,
+                    k_in: float, sigma_in: float) -> pd.DataFrame:
         frames = []
         for key, grp in sales_in.groupby("Key"):
-            res = hampel_filter(grp, window_size=window_in, n_sigma=nsigma_in)
+            res = detect_and_correct_outliers(
+                grp, method=method_in, k=k_in, n_sigma=sigma_in)
             if res.empty:
                 continue
             res.insert(0, "Key", key)
             frames.append(res)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    all_results = compute_all(sales_f, window_size, n_sigma)
+    all_results = compute_all(sales_f, method, k_val, sigma_val)
     if all_results.empty:
         st.info("No data available for outlier computation.")
         return
@@ -828,13 +1390,14 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         key_df = all_results[all_results["Key"] == chosen_key].sort_values("Date")
         hff_key = hist_ff[hist_ff["Key"] == chosen_key].sort_values("Date") \
             if not hist_ff.empty else pd.DataFrame(columns=["Date", "Value"])
-        _render_key_chart(chosen_key, key_df, hff_key, window_size, n_sigma)
+        _render_key_chart(chosen_key, key_df, hff_key, method,
+                          k_val if method == "IQR" else sigma_val)
 
         # Per-Key cleansed-history download
         cleansed = key_df[["Date", "Value", "Filtered", "IsOutlier"]].copy()
         cleansed = cleansed.rename(columns={
             "Value": "Sales History (kg)",
-            "Filtered": "Hampel Cleansed History (kg)",
+            "Filtered": "Cleansed History (kg)",
         })
         cleansed["Date"] = pd.to_datetime(cleansed["Date"]).dt.strftime("%Y-%m-%d")
         cbuf = io.StringIO()
@@ -842,7 +1405,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         st.download_button(
             "⬇️ Download this Key's cleansed history (CSV)",
             data=cbuf.getvalue(),
-            file_name=f"hampel_cleansed_{chosen_key}.csv",
+            file_name=f"cleansed_{method.lower()}_{chosen_key}.csv",
             mime="text/csv",
             key="outlier::dl_key",
         )
@@ -862,11 +1425,11 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
             "Value": "Original", "Filtered": "Corrected"})
         cols = ["Key", "Business Line", "Material", "Ship To Sub Region",
                 "Arkieva ABC", "Arkieva Pattern", "Date", "Original",
-                "Corrected", "Median", "Lower", "Upper"]
+                "Corrected", "Center", "Lower", "Upper"]
         st.dataframe(
             outlier_df[cols].style.format(
                 {c: "{:,.2f}" for c in
-                 ["Original", "Corrected", "Median", "Lower", "Upper"]},
+                 ["Original", "Corrected", "Center", "Lower", "Upper"]},
                 na_rep="–",
             ),
             use_container_width=True,
@@ -876,7 +1439,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         st.download_button(
             "⬇️ Download all corrected outliers (CSV)",
             data=buf.getvalue(),
-            file_name="hampel_corrected_outliers.csv",
+            file_name=f"corrected_outliers_{method.lower()}.csv",
             mime="text/csv",
             key="outlier::dl_all",
         )
@@ -884,14 +1447,14 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     # ---- Full cleansed-history export (all Keys) ----------------------------
     st.markdown("### 🧼 Cleansed history export")
     st.caption(
-        "The full Hampel-cleansed Sales History for every Key in the current "
-        "filter selection — outliers replaced by the local median, all other "
-        "points unchanged."
+        "The full cleansed Sales History for every Key in the current filter "
+        "selection — outliers replaced by the method's central estimate, all "
+        "other points unchanged."
     )
     full_clean = all_results[["Key", "Date", "Value", "Filtered", "IsOutlier"]].copy()
     full_clean = full_clean.rename(columns={
         "Value": "Sales History (kg)",
-        "Filtered": "Hampel Cleansed History (kg)",
+        "Filtered": "Cleansed History (kg)",
     })
     full_clean["Date"] = pd.to_datetime(full_clean["Date"]).dt.strftime("%Y-%m-%d")
     fbuf = io.StringIO()
@@ -899,7 +1462,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     st.download_button(
         "⬇️ Download full cleansed history — all Keys (CSV)",
         data=fbuf.getvalue(),
-        file_name="hampel_cleansed_history_all_keys.csv",
+        file_name=f"cleansed_history_all_keys_{method.lower()}.csv",
         mime="text/csv",
         key="outlier::dl_full_clean",
     )
@@ -909,45 +1472,46 @@ def _render_key_chart(
     key: str,
     key_df: pd.DataFrame,
     hff_df: pd.DataFrame,
-    window_size: int,
-    n_sigma: float,
+    method: str,
+    param: float,
 ) -> None:
     fig = go.Figure()
 
-    # Threshold band (median ± threshold)
+    # Threshold band (center ± bound)
     bounds_df = key_df.dropna(subset=["Lower", "Upper"]).sort_values("Date")
     if not bounds_df.empty:
         fig.add_trace(go.Scatter(
             x=bounds_df["Date"], y=bounds_df["Upper"],
-            mode="lines", name="Median + threshold",
-            line=dict(color="rgba(150,150,150,0.5)", width=1, dash="dot"),
+            mode="lines", name="Upper bound",
+            line=dict(color="rgba(154,164,178,0.5)", width=1, dash="dot"),
             hovertemplate="Upper: %{y:,.2f}<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
             x=bounds_df["Date"], y=bounds_df["Lower"],
-            mode="lines", name="Median − threshold",
-            line=dict(color="rgba(150,150,150,0.5)", width=1, dash="dot"),
-            fill="tonexty", fillcolor="rgba(150,150,150,0.12)",
+            mode="lines", name="Lower bound",
+            line=dict(color="rgba(154,164,178,0.5)", width=1, dash="dot"),
+            fill="tonexty", fillcolor="rgba(154,164,178,0.10)",
             hovertemplate="Lower: %{y:,.2f}<extra></extra>",
         ))
 
-    # Original Sales History
+    # Original Sales History (solid)
     fig.add_trace(go.Scatter(
         x=key_df["Date"], y=key_df["Value"],
         mode="lines+markers", name="Sales History (original)",
-        line=dict(color=SERIES_STYLE[SALES_HISTORY_LABEL]["color"], width=2),
+        line=dict(color=SERIES_STYLE[SALES_HISTORY_LABEL]["color"], width=2.4,
+                  shape="spline", smoothing=0.5),
         marker=dict(size=6),
         hovertemplate="<b>Sales History</b><br>%{x|%b %Y}"
                       "<br>Value: %{y:,.2f} kg<extra></extra>",
     ))
 
-    # Hampel cleansed history
+    # Cleansed history (solid, distinct colour)
     fig.add_trace(go.Scatter(
         x=key_df["Date"], y=key_df["Filtered"],
-        mode="lines+markers", name="Hampel cleansed history",
-        line=dict(color="#2ca02c", width=2, dash="dash"),
+        mode="lines+markers", name="Cleansed history (corrected)",
+        line=dict(color="#51cf66", width=2.4, shape="spline", smoothing=0.5),
         marker=dict(size=5, symbol="square"),
-        hovertemplate="<b>Hampel cleansed</b><br>%{x|%b %Y}"
+        hovertemplate="<b>Cleansed</b><br>%{x|%b %Y}"
                       "<br>Value: %{y:,.2f} kg<extra></extra>",
     ))
 
@@ -957,7 +1521,7 @@ def _render_key_chart(
             x=hff_df["Date"], y=hff_df["Value"],
             mode="lines", name="History For Forecast (unchanged)",
             line=dict(color=SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"],
-                      width=1.6),
+                      width=1.8),
             hovertemplate="<b>History For Forecast</b><br>%{x|%b %Y}"
                           "<br>Value: %{y:,.2f} kg<extra></extra>",
         ))
@@ -968,26 +1532,25 @@ def _render_key_chart(
         fig.add_trace(go.Scatter(
             x=out_df["Date"], y=out_df["Value"],
             mode="markers", name="Outlier (corrected)",
-            marker=dict(color="#d62728", size=13, symbol="x-thin",
-                        line=dict(color="#d62728", width=3)),
+            marker=dict(color="#ff6b6b", size=13, symbol="x-thin",
+                        line=dict(color="#ff6b6b", width=3)),
             hovertemplate="<b>OUTLIER</b><br>%{x|%b %Y}<br>"
                           "Value: %{y:,.2f}<extra></extra>",
         ))
 
-    fig.update_layout(
-        title=f"{key} — Hampel filter (window ±{window_size}, n_sigma = {n_sigma})",
+    param_label = f"k = {param}" if method == "IQR" else f"n_sigma = {param}"
+    dark_layout(
+        fig,
+        title=f"{key} — {method} method ({param_label})",
         xaxis_title="Months", yaxis_title="Demand volume in kgs",
-        hovermode="x unified", template="plotly_white",
-        height=520, margin=dict(t=70, l=60, r=30, b=140),
-        legend=dict(
-            orientation="h",
-            yanchor="top", y=-0.18,
-            xanchor="center", x=0.5,
-        ),
+        height=540,
+        legend=dict(orientation="h", yanchor="top", y=-0.32,
+                    xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=DARK_TEXT)),
+        margin=dict(t=70, l=60, r=30, b=150),
     )
-    fig.update_xaxes(tickformat="%b %Y", showgrid=True, gridcolor="#eee")
-    fig.update_yaxes(showgrid=True, gridcolor="#eee", tickformat=",.0f")
-    st.plotly_chart(fig, use_container_width=True)
+    add_time_controls(fig)
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
     n_out = int(key_df["IsOutlier"].sum())
     if n_out:
@@ -999,9 +1562,131 @@ def _render_key_chart(
 
 
 # ---------------------------------------------------------------------------
+# UI – Tab 3: Year-over-Year Seasonality (Change 4)
+# ---------------------------------------------------------------------------
+def render_seasonality_tab(long_df: pd.DataFrame) -> None:
+    st.subheader("📅 Year-over-Year Seasonality")
+    st.caption(
+        "Compare the **monthly seasonal shape** of the last 3 historical "
+        "years of Sales History against the forecast period. Each line is a "
+        "seasonal index: a value of 1.10 means that month runs ~10% above "
+        "that period's average. Use it to check whether the forecast carries "
+        "the same seasonality as recent history."
+    )
+
+    # ---- Filter strip (same six as the outlier tab) ------------------------
+    season_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
+    with st.container(border=True):
+        st.markdown("**🔎 Filters** — leave empty to include everything. Filters cascade: each one narrows the choices in the others (Excel-slicer style).")
+        selections = render_filter_strip(
+            long_df, season_filter_cols, key_prefix="season",
+        )
+
+    filtered = apply_filters(long_df, selections)
+    if filtered.empty:
+        st.warning("No data matches the current filter combination.")
+        return
+
+    boundary = history_forecast_boundary(filtered)
+
+    sales = filtered[filtered["Data"] == SALES_HISTORY_LABEL]
+    sales_grp = (sales.dropna(subset=["Value"])
+                 .groupby("Date", as_index=False)["Value"].sum())
+    forecast = filtered[filtered["Data"] == STAT_FORECAST_LABEL]
+    fcst_grp = (forecast.dropna(subset=["Value"])
+                .groupby("Date", as_index=False)["Value"].sum())
+
+    analysis = seasonality_analysis(sales_grp, fcst_grp, boundary, n_years=3)
+
+    if analysis["hist_profile"] is None:
+        st.info("Not enough historical Sales-History data to compute seasonality.")
+        return
+
+    months = list(range(1, 13))
+    month_labels = [pd.Timestamp(2000, m, 1).strftime("%b") for m in months]
+
+    fig = go.Figure()
+
+    # Per-year historical profiles (thin, muted)
+    year_palette = ["#4dabf7", "#3bc9db", "#9775fa"]
+    for i, (yr, prof) in enumerate(sorted(analysis["per_year"].items())):
+        if prof is None:
+            continue
+        fig.add_trace(go.Scatter(
+            x=month_labels, y=prof.reindex(months).values,
+            mode="lines+markers", name=f"History {yr}",
+            line=dict(color=year_palette[i % len(year_palette)], width=1.6),
+            marker=dict(size=5),
+            legendgroup="History",
+            hovertemplate=f"History {yr}<br>%{{x}}<br>Index: %{{y:.2f}}<extra></extra>",
+        ))
+
+    # Average historical profile (bold)
+    fig.add_trace(go.Scatter(
+        x=month_labels, y=analysis["hist_profile"].reindex(months).values,
+        mode="lines+markers", name="History (3-yr avg)",
+        line=dict(color="#4da3ff", width=3.4),
+        marker=dict(size=7),
+        legendgroup="History",
+        hovertemplate="History 3-yr avg<br>%{x}<br>Index: %{y:.2f}<extra></extra>",
+    ))
+
+    # Forecast profile (bold, contrasting)
+    if analysis["fcst_profile"] is not None:
+        fig.add_trace(go.Scatter(
+            x=month_labels, y=analysis["fcst_profile"].reindex(months).values,
+            mode="lines+markers", name="Forecast",
+            line=dict(color="#ffa94d", width=3.4),
+            marker=dict(size=7, symbol="diamond"),
+            legendgroup="Forecast",
+            hovertemplate="Forecast<br>%{x}<br>Index: %{y:.2f}<extra></extra>",
+        ))
+
+    # Reference line at index = 1.0 (the period average)
+    fig.add_hline(y=1.0, line=dict(color=DARK_MUTED, width=1, dash="dot"),
+                  annotation_text="period average",
+                  annotation_font=dict(color=DARK_MUTED, size=11))
+
+    dark_layout(
+        fig,
+        title="Monthly seasonal index — History vs Forecast",
+        xaxis_title="Month", yaxis_title="Seasonal index (1.0 = average)",
+        height=520,
+        legend=dict(orientation="h", yanchor="top", y=-0.28,
+                    xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=DARK_TEXT)),
+        margin=dict(t=70, l=60, r=30, b=120),
+    )
+    # Seasonality x-axis is categorical months — no rangeslider needed.
+    fig.update_xaxes(showspikes=True)
+    fig.update_yaxes(tickformat=".2f")
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+    # ---- Interpretation -----------------------------------------------------
+    status, message = interpret_seasonality(analysis)
+    st.markdown("#### 🧭 Seasonality interpretation")
+    if status == "ok":
+        st.success(message)
+    elif status == "warn":
+        st.warning(message)
+    else:
+        st.info(message)
+
+    if analysis["correlation"] is not None:
+        st.caption(
+            f"Based on {analysis['n_hist_years']} historical year(s). "
+            "Correlation ranges from −1 (opposite shape) to +1 (identical "
+            "shape); values ≥ 0.7 indicate the forecast preserves the "
+            "historical seasonal pattern well."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main entry-point
 # ---------------------------------------------------------------------------
 def main() -> None:
+    inject_dark_theme_css()
+
     # ---- Authentication gate ------------------------------------------------
     # Nothing below this block (including the file uploader) renders until
     # the user signs in with a valid username and password.
@@ -1043,10 +1728,14 @@ def main() -> None:
             "**This dashboard provides:**\n"
             "1. An interactive replica of the *Forecast vs Actuals* pivot "
             "chart with all original slicer filters on top — clearly "
-            "splitting **History** vs **Forecast** series.\n"
-            "2. A **Hampel-filter** outlier detection & correction view for "
-            "the **Sales History** time series of every Key, producing a "
-            "cleansed history alongside the original."
+            "splitting **History** vs **Forecast** series, with optional "
+            "**trend lines** and an automatic trend interpretation.\n"
+            "2. An **outlier detection & correction** view (choose **IQR** or "
+            "**Sigma**) for the **Sales History** of every Key, producing a "
+            "cleansed history alongside the original.\n"
+            "3. A **year-over-year seasonality** view comparing the forecast's "
+            "seasonal shape against the last 3 historical years, with an "
+            "automatic interpretation of forecast quality."
         )
         st.stop()
 
@@ -1069,11 +1758,17 @@ def main() -> None:
         st.error("The uploaded file contains no usable rows.")
         st.stop()
 
-    tab1, tab2 = st.tabs(["📈 Forecast vs Actuals", "🚨 Outlier Detection & Correction"])
+    tab1, tab2, tab3 = st.tabs([
+        "📈 Forecast vs Actuals",
+        "🚨 Outlier Detection & Correction",
+        "📅 Seasonality (YoY)",
+    ])
     with tab1:
         render_dashboard_tab(long_df, uploaded.name)
     with tab2:
         render_outlier_tab(long_df)
+    with tab3:
+        render_seasonality_tab(long_df)
 
 
 if __name__ == "__main__":

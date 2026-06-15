@@ -1,9 +1,10 @@
 # Forecast vs Actuals — Interactive Dashboard
 
-A production-grade Streamlit application that replicates the Excel
-**"Forecast vs Actuals" pivot dashboard** and adds an interactive
-**Hampel-filter outlier detection & correction** view for the
-sales-history time series.
+A production-grade, **dark-themed** Streamlit application that replicates
+the Excel **"Forecast vs Actuals" pivot dashboard** and adds interactive
+**outlier detection & correction** (IQR or Sigma), **trend analysis**, and
+**year-over-year seasonality** views — each with automatic, plain-language
+interpretations of forecast quality.
 
 The app accepts the standard *Forecast vs Actuals* monthly Excel file
 (file name typically ends with the reporting month, e.g.
@@ -37,6 +38,14 @@ every chart dynamically from the most recently uploaded file.
 > passwords with your users through a private channel — never commit
 > plaintext passwords or document them in this README.
 
+### Dark theme
+- The entire UI uses a **dark theme** — background, filters, dropdown
+  menus, the file uploader, buttons, tabs, metric cards and tables — with
+  high-contrast light text chosen for legibility. The theme is set both
+  via `.streamlit/config.toml` (so it applies from first paint) and via
+  in-app CSS for the widgets the config alone doesn't fully cover. All
+  Plotly charts use a matching dark canvas with light, legible labels.
+
 ### Tab 1 — Forecast vs Actuals
 A faithful reproduction of the original Excel pivot dashboard:
 
@@ -44,32 +53,52 @@ A faithful reproduction of the original Excel pivot dashboard:
   (no sidebar): Business Line, Arkieva ABC, Ship To Sub Region, Material,
   Stat Flag, Arkieva Pattern, Data. Picking a value in one filter narrows
   the choices shown by every other filter (Excel-slicer style).
-- **Date-range slider** for the months shown.
-- **Maximised chart area**: the legend sits *below* the chart, so all
-  series are clearly visible.
-- **Clear History vs Forecast highlighting**: a tinted blue *History*
-  band and orange *Forecast* band separated by a vertical boundary at the
-  last month of Sales History; History series are solid lines, Forecast
-  series are dashed/dotted.
+- **Date-range slider** plus an **interactive chart range slider and quick
+  range buttons** (6m / 1y / 2y / All) right on the plot.
+- **Highly interactive, presentable line chart**: smooth (spline) **solid**
+  lines for *every* series — both History and Forecast (no more dotted
+  forecast lines); unified hover, spike lines, zoom/pan, and a legend below
+  the chart for maximum plot area.
+- **Clear History vs Forecast highlighting**: a tinted *History* band and
+  *Forecast* band separated by a vertical boundary at the last month of
+  Sales History; the two groups are distinguished by colour family and
+  marker shape.
+- **Trend lines** (toggle): a linear trend is fitted separately to the
+  history and forecast periods and overlaid, with an **automatic
+  interpretation** telling you whether the forecast follows the historical
+  trend direction and flagging implausibly steep forecast growth.
 - KPI cards (unique Keys, Materials, Months, Total volume).
 
-### Tab 2 — Outlier Detection & Correction (Hampel filter)
+### Tab 2 — Outlier Detection & Correction (IQR or Sigma)
 - The **same six cascading filters at the top** (the *Data* filter is
   omitted because this view is intrinsically scoped to *Sales History
   (kg)*). Filter state is independent from Tab 1.
-- Detects **and corrects** outliers in **Sales History (kg)** using the
-  **Hampel filter** (see method notes below).
-- Produces a **"Hampel filter cleansed history"** for each Key — the
-  Sales History with every flagged outlier replaced by its local
-  (window) median. This cleansed series is drawn on the per-Key chart
-  alongside the original Sales History.
-- **History For Forecast (kg)** is shown **unchanged** on the same chart
-  for comparison — it is never modified.
-- Adjustable Hampel parameters: rolling-window half-width and `n_sigma`
-  threshold (default 3.0).
-- Per-Key inspection chart (original + cleansed + History-For-Forecast +
-  threshold band + outlier markers), a table of all corrected outliers,
-  and CSV exports of the cleansed history (per-Key and all-Keys).
+- **Choose one of two methods**:
+  - **IQR (Tukey's fences)** — flags points outside
+    `[Q1 − k·IQR, Q3 + k·IQR]` and corrects each to the series **median**.
+  - **Sigma (z-score)** — flags points beyond `mean ± n·σ` (mean/σ
+    estimated **robustly**, after trimming gross outliers via the median ±
+    MAD, so the bounds aren't inflated by the very outliers being detected)
+    and corrects each to the **mean**.
+  Both corrections are statistically valid central estimates.
+- The per-Key chart shows the **original Sales History** and the
+  **cleansed history** (after correction) as solid lines, the threshold
+  band, outlier markers, and **History For Forecast (kg)** unchanged for
+  comparison.
+- A table of all corrected outliers and CSV exports of the cleansed
+  history (per-Key and all-Keys).
+
+### Tab 3 — Year-over-Year Seasonality
+- Compares the **monthly seasonal shape** of the last **3 historical
+  years** of Sales History against the forecast period. Each line is a
+  seasonal index (1.0 = that period's average; 1.10 = ~10% above average).
+- Shows each recent year individually, the 3-year average, and the
+  forecast profile, with a reference line at 1.0.
+- An **automatic interpretation** reports the correlation between the
+  forecast and historical seasonal shapes, names the historical peak and
+  trough months, and tells you whether the forecast preserves seasonality
+  (≥ 0.7 = strong match), partially matches, diverges, or is flat where
+  history is seasonal.
 
 ### Input normalisation
 - The statistical-forecast line may appear in the input as either
@@ -103,26 +132,46 @@ month/date columns (one column per month):
 
 ---
 
-## Method notes — Hampel filter
+## Method notes
+
+### Outlier detection & correction
 
 For a single time series `x` (the Sales History of one Key):
 
-1. A **centred rolling window** of half-width `w` slides over the series,
-   so the full window spans `2·w + 1` points.
-2. For each point `i`, compute the window **median** `m_i` and the
-   **Median Absolute Deviation** `MAD_i = median(|x − m_i|)` over the window.
-3. The robust scale estimate is `σ_i = 1.4826 · MAD_i` (the `1.4826`
-   factor makes the MAD a consistent estimator of the standard deviation
-   for Gaussian data), and the threshold is `n_sigma · σ_i`.
-4. Point `i` is an **outlier** when `|x_i − m_i| > n_sigma · σ_i`.
-5. **Correction**: each outlier is replaced by the window median `m_i`,
-   producing the *cleansed history*. All non-outlier points are unchanged.
+**IQR (Tukey's fences)**
+1. Compute the first and third quartiles `Q1`, `Q3` and `IQR = Q3 − Q1`.
+2. A point is an outlier when it falls outside `[Q1 − k·IQR, Q3 + k·IQR]`
+   (default `k = 1.5`).
+3. **Correction**: each outlier is replaced by the series **median** — a
+   robust central value that is not distorted by the outliers it replaces.
 
-This matches the algorithm in
-<https://medium.com/@migueloteropedrido/hampel-filter-with-python-17db1d265375>
-and the `hampel` PyPI library (verified to give identical outlier
-indices in tests). The implementation here is dependency-free (pure
-NumPy/pandas) so it deploys cleanly to Streamlit Cloud.
+**Sigma (z-score / empirical rule)**
+1. Estimate the mean `μ` and standard deviation `σ` **robustly**: first
+   exclude gross outliers (those beyond `median ± n·1.4826·MAD`), then
+   compute `μ`, `σ` on what remains, so the bounds aren't inflated by the
+   very points being detected.
+2. A point is an outlier when `|x − μ| > n·σ` (default `n = 3`).
+3. **Correction**: each outlier is replaced by the (robust) **mean**.
+
+In both methods, non-outlier points are left unchanged, producing the
+*cleansed history*. The implementation is pure NumPy/pandas, so it deploys
+cleanly to Streamlit Cloud. (A Hampel-filter implementation also remains in
+the codebase for reference, but the UI exposes IQR and Sigma.)
+
+### Trend analysis
+A linear (ordinary least-squares) trend is fitted separately to the
+history and forecast periods. The slope is reported per year and as a % of
+the mean level, with R² as goodness-of-fit. The interpretation compares
+the two directions (rising / falling / flat) and flags when the forecast
+trend diverges from history or grows implausibly faster than history.
+
+### Year-over-year seasonality
+For each period a **seasonal index** is computed: the average value in each
+calendar month divided by the overall average (so 1.0 = average month).
+The forecast's seasonal shape is compared to the last 3 historical years
+via Pearson correlation of the two 12-point profiles. ≥ 0.7 indicates the
+forecast preserves the historical seasonal pattern; a flat forecast against
+a seasonal history is flagged as a mismatch.
 
 ---
 
@@ -145,13 +194,15 @@ Python 3.9 or newer is required. Streamlit prints a local URL (typically
 Follow these steps to put the app online for free.
 
 ### 1. Prepare the project folder
-Make a folder containing exactly these three files:
+Make a folder containing these files (note the `.streamlit` folder):
 
 ```
 forecast-vs-actuals/
 ├── app.py
 ├── requirements.txt
-└── README.md
+├── README.md
+└── .streamlit/
+    └── config.toml
 ```
 
 > Do **not** commit any customer Excel files — the app takes its input by
@@ -170,7 +221,7 @@ Using the command line (with Git installed):
 ```bash
 cd forecast-vs-actuals
 git init
-git add app.py requirements.txt README.md
+git add app.py requirements.txt README.md .streamlit/config.toml
 git commit -m "Initial commit: Forecast vs Actuals dashboard"
 git branch -M main
 git remote add origin https://github.com/<your-username>/forecast-vs-actuals.git
@@ -222,10 +273,15 @@ Streamlit detects the push and rebuilds within a minute.
 
 ```
 .
-├── app.py              # Streamlit application
-├── requirements.txt    # Pinned dependency ranges
-└── README.md
+├── app.py                    # Streamlit application
+├── requirements.txt          # Pinned dependency ranges
+├── README.md
+└── .streamlit/
+    └── config.toml           # Dark theme + max upload size
 ```
+
+> Commit the `.streamlit/config.toml` file too — it is what makes the
+> deployed app dark-themed from the first paint.
 
 ---
 
