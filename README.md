@@ -116,19 +116,7 @@ A faithful reproduction of the original Excel pivot dashboard:
 
 ---
 
-## Expected input file format
 
-The first sheet must contain these identifier columns followed by
-month/date columns (one column per month):
-
-| Identifier columns | Date columns |
-|---|---|
-| `Key`, `Business Line`, `Material`, `Material code`, `Ship To Sub Region`, `Arkieva ABC`, `Arkieva Pattern`, `Stat Flag`, `Data` | `2023-04-01`, `2023-05-01`, …, `2028-03-01` |
-
-`Data` should take the values: `Sales History (kg)`,
-`History For Forecast (kg)`, `Statistical Forecast (kg)` *(or
-"Statistical Forecast Committed (kg)", which is auto-normalised)*, and
-`Final Demand Plan Lag 1 (kg)`.
 
 ---
 
