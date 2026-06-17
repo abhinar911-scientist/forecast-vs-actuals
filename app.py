@@ -128,6 +128,29 @@ def inject_dark_theme_css() -> None:
 
         /* ---- Dataframe ---- */
         [data-testid="stDataFrame"] { background-color: #1a1f2b; }
+
+        /* ---- Fullscreen chart overlay ----
+           When a chart is expanded with the "Fullscreen" button, Streamlit
+           renders it inside an overlay container that defaults to white.
+           Force that overlay (and its wrapper) to the dark background so the
+           chart keeps the same dark theme as the embedded view. */
+        [data-testid="stFullScreenFrame"] > div,
+        [data-testid="stFullScreenFrame"],
+        div[data-testid="stFullScreenFrame"] iframe,
+        .element-container:fullscreen,
+        [data-testid="stFullScreenFrame"]:fullscreen,
+        [data-testid="stFullScreenFrame"] > div:fullscreen {
+            background-color: #0e1117 !important;
+        }
+        /* The vendored fullscreen wrapper used by st.plotly_chart */
+        :fullscreen, ::backdrop {
+            background-color: #0e1117 !important;
+        }
+        [data-testid="stFullScreenFrame"] [data-testid="stPlotlyChart"],
+        [data-testid="stFullScreenFrame"] .js-plotly-plot,
+        [data-testid="stFullScreenFrame"] .plot-container {
+            background-color: #0e1117 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -302,8 +325,13 @@ def dark_layout(fig: "go.Figure", **overrides) -> "go.Figure":
     """
     base = dict(
         template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        # Solid dark backgrounds (not transparent): a transparent paper/plot
+        # background lets Streamlit's white fullscreen overlay show through
+        # when the chart is expanded. Using the app's dark colour keeps the
+        # chart dark in BOTH the embedded and fullscreen views, while still
+        # blending seamlessly with the dark page background.
+        paper_bgcolor=DARK_BG,
+        plot_bgcolor=DARK_BG,
         font=dict(color=DARK_TEXT, size=13),
         hovermode="x unified",
         hoverlabel=dict(bgcolor=DARK_PANEL, font_size=12,
