@@ -1092,6 +1092,304 @@ def interpret_seasonality(analysis: dict) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Anomaly Summary engine
+# ---------------------------------------------------------------------------
+# Reason codes and the Demand-Planner guidance that goes with each. The
+# guidance is intentionally action-oriented: root cause + recommended next
+# step from a demand-planning point of view.
+REASON_CODES = {
+    "TREND_REVERSAL": {
+        "label": "Trend reversal",
+        "short": "Forecast trend points the opposite way to history.",
+        "root_cause": (
+            "The statistical model has inferred a turning point: the forecast "
+            "trends in the opposite direction to the recent sales-history "
+            "trend (e.g. history rising while the forecast falls). This is "
+            "usually driven by (a) a few recent months that broke the prior "
+            "pattern, (b) outliers near the end of history pulling the fit, "
+            "or (c) a model/parameter change at the last regeneration."
+        ),
+        "next_steps": (
+            "1) Open the Forecast vs Actuals chart for this Key and confirm the "
+            "reversal visually. 2) Check the last 3–6 months of Sales History "
+            "for outliers or one-off events (promotions, stock-outs, returns). "
+            "3) If the reversal is not backed by a real business event, "
+            "override the forecast toward the historical direction or re-run "
+            "after cleansing the recent outliers. 4) If it IS backed by a known "
+            "event (lost customer, new listing), document the assumption."
+        ),
+    },
+    "TREND_MISMATCH": {
+        "label": "Trend magnitude mismatch",
+        "short": "Same direction, but forecast slope is far steeper/flatter.",
+        "root_cause": (
+            "History and forecast move the same way, but the forecast's rate of "
+            "change is disproportionate to history (for example, forecast "
+            "growing several times faster than the historical growth rate). "
+            "This often comes from short-history overfitting, an aggressive "
+            "trend smoothing parameter, or recent spikes amplifying the slope."
+        ),
+        "next_steps": (
+            "1) Compare the history vs forecast slope (%/yr) shown in the "
+            "drill-down. 2) Sanity-check the implied volume at the end of the "
+            "horizon against business expectations. 3) If unrealistic, dampen "
+            "the trend (trend-damping parameter) or cap growth, then re-run. "
+            "4) Validate against any account/market intelligence before "
+            "committing."
+        ),
+    },
+    "SEASONALITY_LOSS": {
+        "label": "Seasonality not captured",
+        "short": "History is seasonal but the forecast is (near) flat.",
+        "root_cause": (
+            "The recent sales history shows a repeating intra-year pattern "
+            "(clear peak and trough months), but the forecast does not "
+            "reproduce that shape. Typical causes: too few history points for "
+            "the model to lock onto seasonality, a non-seasonal model being "
+            "selected, or seasonality being washed out by noise/outliers."
+        ),
+        "next_steps": (
+            "1) Open the Seasonality (YoY) view for this Key and confirm the "
+            "historical peak/trough months. 2) Ensure the model is allowed to "
+            "fit seasonality (seasonal profile / enough history). 3) If history "
+            "is reliable, apply the historical seasonal profile or switch to a "
+            "seasonal model, then re-run. 4) Confirm the seasonality is genuine "
+            "and not driven by a single anomalous year."
+        ),
+    },
+    "IQR_OUTLIERS": {
+        "label": "Outliers in sales history (IQR)",
+        "short": "Multiple history points violate the IQR fences.",
+        "root_cause": (
+            "The sales history for this Key contains several points outside the "
+            "IQR fences (Q1−1.5·IQR / Q3+1.5·IQR). These spikes/drops are often "
+            "promotions, bulk orders, data-entry errors, stock-outs, or "
+            "returns. Because the statistical forecast is fitted on this "
+            "history, the outliers can distort both the level and the trend."
+        ),
+        "next_steps": (
+            "1) Open the Outlier Detection & Correction tab for this Key. "
+            "2) Review each flagged point against known events. 3) Replace "
+            "genuine anomalies with the cleansed value (median) and re-run the "
+            "forecast on the cleansed history. 4) For recurring causes "
+            "(e.g. monthly promos), consider modelling them explicitly rather "
+            "than treating them as noise."
+        ),
+    },
+}
+
+
+def analyze_key_anomalies(
+    key_long_df: pd.DataFrame,
+    boundary: Optional[pd.Timestamp],
+    iqr_k: float = 1.5,
+    trend_mismatch_ratio: float = 3.0,
+    seasonality_corr_threshold: float = 0.3,
+    seasonality_min_amplitude: float = 0.10,
+) -> Optional[dict]:
+    """Analyse a single Key (already filtered to one Key) and return its
+    anomaly profile: which reason codes apply, a severity score, and the
+    supporting metrics used in the drill-down.
+
+    Returns None if there isn't enough data to assess the Key.
+    """
+    if key_long_df.empty or boundary is None:
+        return None
+
+    sales = (key_long_df[key_long_df["Data"] == SALES_HISTORY_LABEL]
+             .dropna(subset=["Value"]))
+    sales = sales[sales["Date"] <= boundary]
+    sales_grp = sales.groupby("Date", as_index=False)["Value"].sum()
+
+    fcst = (key_long_df[key_long_df["Data"] == STAT_FORECAST_LABEL]
+            .dropna(subset=["Value"]))
+    fcst = fcst[fcst["Date"] > boundary]
+    fcst_grp = fcst.groupby("Date", as_index=False)["Value"].sum()
+
+    # Need some history to say anything meaningful.
+    nonzero_hist = sales_grp[sales_grp["Value"] != 0]
+    if len(nonzero_hist) < 6:
+        return None
+
+    reasons = []          # list of dicts: {code, severity, detail}
+    metrics = {}
+
+    # ---- Trend analysis ----------------------------------------------------
+    hist_trend = fit_trend(sales_grp["Date"], sales_grp["Value"])
+    fcst_trend = fit_trend(fcst_grp["Date"], fcst_grp["Value"]) if len(fcst_grp) >= 2 else None
+    metrics["hist_trend"] = hist_trend
+    metrics["fcst_trend"] = fcst_trend
+
+    if hist_trend is not None and fcst_trend is not None:
+        h = hist_trend["pct_per_year"]
+        f = fcst_trend["pct_per_year"]
+        metrics["hist_pct_per_year"] = h
+        metrics["fcst_pct_per_year"] = f
+
+        if h is not None and f is not None:
+            flat = 2.0  # within ±2%/yr is "flat"
+            h_dir = 0 if abs(h) <= flat else (1 if h > 0 else -1)
+            f_dir = 0 if abs(f) <= flat else (1 if f > 0 else -1)
+
+            # Trend reversal: directions strictly opposite (one up, one down)
+            if h_dir != 0 and f_dir != 0 and h_dir != f_dir:
+                # severity scales with the combined magnitude of the swing
+                sev = min(100.0, (abs(h) + abs(f)) / 2.0)
+                reasons.append({
+                    "code": "TREND_REVERSAL",
+                    "severity": 60.0 + 0.4 * sev,   # high base — most serious
+                    "detail": f"History {h:+.1f}%/yr vs forecast {f:+.1f}%/yr",
+                })
+            else:
+                # Trend magnitude mismatch (same direction but disparate rate)
+                if abs(h) > 1e-6:
+                    ratio = abs(f) / abs(h) if h != 0 else np.inf
+                    metrics["trend_ratio"] = ratio
+                    if ratio >= trend_mismatch_ratio or (ratio > 0 and ratio <= 1.0 / trend_mismatch_ratio):
+                        # How far from parity (1.0), in log space, capped
+                        far = abs(np.log10(ratio)) if ratio > 0 else 2.0
+                        sev = min(100.0, far * 40.0)
+                        reasons.append({
+                            "code": "TREND_MISMATCH",
+                            "severity": 30.0 + 0.4 * sev,
+                            "detail": (f"Forecast slope {f:+.1f}%/yr vs history "
+                                       f"{h:+.1f}%/yr (~{ratio:.1f}× rate)"),
+                        })
+
+    # ---- Seasonality analysis ----------------------------------------------
+    analysis = seasonality_analysis(sales_grp, fcst_grp, boundary, n_years=3)
+    metrics["seasonality"] = analysis
+    hp = analysis["hist_profile"]
+    fp = analysis["fcst_profile"]
+    if hp is not None:
+        hist_amp = float(np.nanstd(hp.values))
+        metrics["hist_seasonal_amplitude"] = hist_amp
+        corr = analysis["correlation"]
+        metrics["seasonal_corr"] = corr
+        fcst_amp = float(np.nanstd(fp.values)) if fp is not None else 0.0
+        metrics["fcst_seasonal_amplitude"] = fcst_amp
+
+        # History is meaningfully seasonal …
+        if hist_amp >= seasonality_min_amplitude and fp is not None:
+            seasonality_lost = (
+                (corr is None and fcst_amp <= 0.02) or
+                (corr is not None and corr < seasonality_corr_threshold)
+            )
+            if seasonality_lost:
+                # severity scales with how strong history seasonality is and
+                # how poor the match is.
+                match_gap = 1.0 - (corr if corr is not None else 0.0)
+                match_gap = max(0.0, min(2.0, match_gap))
+                sev = min(100.0, hist_amp * 100.0 * match_gap)
+                reasons.append({
+                    "code": "SEASONALITY_LOSS",
+                    "severity": 25.0 + 0.5 * sev,
+                    "detail": (f"History seasonal amplitude {hist_amp:.2f}, "
+                               f"forecast match "
+                               f"{('corr ' + format(corr, '+.2f')) if corr is not None else 'flat'}"),
+                })
+
+    # ---- IQR outliers ------------------------------------------------------
+    iqr_res = detect_and_correct_outliers(sales_grp, method="IQR", k=iqr_k)
+    n_out = int(iqr_res["IsOutlier"].sum())
+    metrics["iqr_outlier_count"] = n_out
+    metrics["iqr_result"] = iqr_res
+    if n_out > 0:
+        # relative magnitude of the worst outlier vs the series median
+        med = float(np.median(sales_grp["Value"].replace(0, np.nan).dropna())) \
+            if len(sales_grp) else 0.0
+        worst = 0.0
+        if med and not np.isnan(med):
+            outvals = iqr_res.loc[iqr_res["IsOutlier"], "Value"].to_numpy()
+            if outvals.size:
+                worst = float(np.max(np.abs(outvals - med)) / abs(med))
+        metrics["iqr_worst_rel"] = worst
+        sev = min(100.0, n_out * 12.0 + worst * 20.0)
+        reasons.append({
+            "code": "IQR_OUTLIERS",
+            "severity": 20.0 + 0.5 * sev,
+            "detail": f"{n_out} point(s) violate IQR fences",
+        })
+
+    if not reasons:
+        return None
+
+    # Primary reason = highest-severity; overall score = max severity, with a
+    # small bonus for having multiple concurrent issues.
+    reasons_sorted = sorted(reasons, key=lambda r: r["severity"], reverse=True)
+    primary = reasons_sorted[0]
+    overall = primary["severity"] + 3.0 * (len(reasons_sorted) - 1)
+
+    return {
+        "reasons": reasons_sorted,
+        "primary_code": primary["code"],
+        "primary_detail": primary["detail"],
+        "all_codes": [r["code"] for r in reasons_sorted],
+        "severity": round(float(overall), 1),
+        "metrics": metrics,
+        "sales_grp": sales_grp,
+        "fcst_grp": fcst_grp,
+    }
+
+
+@st.cache_data(show_spinner="Scanning Keys for anomalies…")
+def build_anomaly_summary(filtered_df: pd.DataFrame,
+                          top_n: int = 20) -> pd.DataFrame:
+    """Build the per-Key anomaly table for the current filter selection.
+
+    Returns one row per anomalous Key with its Ship To Sub Region, primary
+    reason code, all reason codes, severity, supporting detail, and the key
+    metrics used in the drill-down. Only the top ``top_n`` Keys (by severity)
+    per Ship To Sub Region are returned.
+    """
+    boundary = history_forecast_boundary(filtered_df)
+    if boundary is None:
+        return pd.DataFrame()
+
+    rows = []
+    # Identify a representative descriptor per Key for the table.
+    descriptor_cols = ["Ship To Sub Region", "Business Line", "Material",
+                       "Arkieva ABC", "Arkieva Pattern"]
+    for key, grp in filtered_df.groupby("Key"):
+        profile = analyze_key_anomalies(grp, boundary)
+        if profile is None:
+            continue
+        first = grp.iloc[0]
+        row = {
+            "Key": key,
+            "Ship To Sub Region": first.get("Ship To Sub Region", "—"),
+            "Business Line": first.get("Business Line", "—"),
+            "Material": first.get("Material", "—"),
+            "Arkieva ABC": first.get("Arkieva ABC", "—"),
+            "Arkieva Pattern": first.get("Arkieva Pattern", "—"),
+            "Primary reason": REASON_CODES[profile["primary_code"]]["label"],
+            "Primary code": profile["primary_code"],
+            "All reasons": ", ".join(
+                REASON_CODES[c]["label"] for c in profile["all_codes"]),
+            "All codes": profile["all_codes"],
+            "Severity": profile["severity"],
+            "Detail": profile["primary_detail"],
+            "IQR outliers": profile["metrics"].get("iqr_outlier_count", 0),
+            "Hist %/yr": profile["metrics"].get("hist_pct_per_year"),
+            "Fcst %/yr": profile["metrics"].get("fcst_pct_per_year"),
+            "Seasonal corr": profile["metrics"].get("seasonal_corr"),
+        }
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    # Keep the top_n most severe per Ship To Sub Region.
+    df = (df.sort_values(["Ship To Sub Region", "Severity"],
+                         ascending=[True, False])
+            .groupby("Ship To Sub Region", group_keys=False)
+            .head(top_n)
+            .reset_index(drop=True))
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Reset on file removal
 # ---------------------------------------------------------------------------
 def reset_app_state() -> None:
@@ -1101,6 +1399,233 @@ def reset_app_state() -> None:
     for k in keys_to_clear:
         del st.session_state[k]
     load_excel.clear()
+
+
+# ---------------------------------------------------------------------------
+# UI – Tab: Anomaly Summary
+# ---------------------------------------------------------------------------
+def render_anomaly_tab(long_df: pd.DataFrame) -> None:
+    st.subheader("🧭 Anomaly Summary")
+    st.caption(
+        "Top anomalies per **Ship To Sub Region** with an automatically "
+        "assigned reason code. Use the drill-down to see the root cause and "
+        "recommended next steps for each Key."
+    )
+
+    # ---- Filters (same set as the Forecast vs Actuals tab) -----------------
+    with st.container(border=True):
+        st.markdown("**🔎 Filters** — leave empty to include everything. Filters cascade: each one narrows the choices in the others (Excel-slicer style).")
+        selections = render_filter_strip(long_df, FILTER_COLUMNS, key_prefix="anom")
+
+    filtered = apply_filters(long_df, selections)
+    if filtered.empty:
+        st.warning("No data matches the current filter combination.")
+        return
+
+    top_n = st.slider(
+        "Top anomalies per Ship To Sub Region", min_value=5, max_value=50,
+        value=20, step=5, key="anom::top_n",
+        help="How many of the most severe anomalous Keys to show for each "
+             "Ship To Sub Region.",
+    )
+
+    summary = build_anomaly_summary(filtered, top_n=top_n)
+
+    if summary.empty:
+        st.success("No anomalies detected for the current filter selection. 🎉")
+        with st.expander("How are anomalies detected?"):
+            _render_reason_code_legend()
+        return
+
+    # ---- Headline metrics ---------------------------------------------------
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Anomalous Keys", f"{summary['Key'].nunique():,}")
+    m2.metric("Sub Regions affected", f"{summary['Ship To Sub Region'].nunique():,}")
+    m3.metric("Trend reversals",
+              f"{(summary['Primary code'] == 'TREND_REVERSAL').sum():,}")
+    m4.metric("Seasonality losses",
+              f"{(summary['Primary code'] == 'SEASONALITY_LOSS').sum():,}")
+
+    # ---- Reason-code breakdown ---------------------------------------------
+    st.markdown("### 📊 Reason-code breakdown")
+    breakdown = (summary["Primary reason"].value_counts()
+                 .rename_axis("Reason").reset_index(name="Keys"))
+    bcol, lcol = st.columns([1.3, 1])
+    with bcol:
+        fig = go.Figure(go.Bar(
+            x=breakdown["Keys"], y=breakdown["Reason"], orientation="h",
+            marker=dict(color="#4da3ff"),
+            hovertemplate="%{y}<br>%{x} Key(s)<extra></extra>",
+        ))
+        dark_layout(
+            fig, title="Primary reason code — Key count",
+            xaxis_title="Number of Keys", yaxis_title="",
+            height=260, margin=dict(t=50, l=10, r=20, b=40),
+            legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center"),
+        )
+        fig.update_yaxes(tickformat="")
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displaylogo": False})
+    with lcol:
+        st.markdown("**Severity by Sub Region (max)**")
+        region_sev = (summary.groupby("Ship To Sub Region")["Severity"].max()
+                      .sort_values(ascending=False).reset_index())
+        st.dataframe(
+            region_sev.style.format({"Severity": "{:.1f}"}),
+            use_container_width=True, hide_index=True,
+        )
+
+    # ---- Per-region table ---------------------------------------------------
+    st.markdown(f"### 📋 Top {top_n} anomalies per Ship To Sub Region")
+    regions = sorted(summary["Ship To Sub Region"].unique().tolist())
+    region_pick = st.selectbox(
+        "Ship To Sub Region", ["(All regions)"] + regions, index=0,
+        key="anom::region_pick",
+    )
+    table = summary if region_pick == "(All regions)" \
+        else summary[summary["Ship To Sub Region"] == region_pick]
+
+    display_cols = ["Ship To Sub Region", "Key", "Primary reason",
+                    "All reasons", "Severity", "Detail", "IQR outliers",
+                    "Hist %/yr", "Fcst %/yr", "Seasonal corr"]
+    st.dataframe(
+        table[display_cols].style.format({
+            "Severity": "{:.1f}",
+            "Hist %/yr": lambda v: "–" if pd.isna(v) else f"{v:+.1f}%",
+            "Fcst %/yr": lambda v: "–" if pd.isna(v) else f"{v:+.1f}%",
+            "Seasonal corr": lambda v: "–" if pd.isna(v) else f"{v:+.2f}",
+        }, na_rep="–"),
+        use_container_width=True, hide_index=True, height=380,
+    )
+
+    csv = table[display_cols].to_csv(index=False)
+    st.download_button(
+        "⬇️ Download anomaly summary (CSV)", data=csv,
+        file_name="anomaly_summary.csv", mime="text/csv",
+        key="anom::dl",
+    )
+
+    # ---- Drill-down ---------------------------------------------------------
+    st.markdown("### 🔬 Drill-down to root cause")
+    st.caption("Select a Key to see the root cause and recommended next steps.")
+    key_choices = table.sort_values("Severity", ascending=False)["Key"].tolist()
+    if not key_choices:
+        return
+    chosen = st.selectbox("Key", key_choices, index=0, key="anom::drill_key")
+
+    _render_anomaly_drilldown(chosen, filtered)
+
+    with st.expander("ℹ️ How are anomalies detected and scored?"):
+        _render_reason_code_legend()
+
+
+def _render_reason_code_legend() -> None:
+    st.markdown(
+        "Each Key's Sales History and Statistical Forecast are analysed and "
+        "assigned one or more **reason codes**. Severity (0–100+) ranks the "
+        "most serious issues first; a Key may carry several codes."
+    )
+    for code, info in REASON_CODES.items():
+        st.markdown(f"- **{info['label']}** (`{code}`): {info['short']}")
+
+
+def _render_anomaly_drilldown(key: str, filtered_df: pd.DataFrame) -> None:
+    boundary = history_forecast_boundary(filtered_df)
+    grp = filtered_df[filtered_df["Key"] == key]
+    profile = analyze_key_anomalies(grp, boundary)
+    if profile is None:
+        st.info("No anomaly details available for this Key.")
+        return
+
+    # Severity + codes header
+    chips = " ".join(
+        f"<span style='background:#2d4b7a;color:#fff;padding:2px 8px;"
+        f"border-radius:10px;margin-right:6px;font-size:0.82em;'>"
+        f"{REASON_CODES[c]['label']}</span>"
+        for c in profile["all_codes"]
+    )
+    st.markdown(
+        f"**Key:** `{key}`  •  **Severity:** {profile['severity']:.1f}<br>{chips}",
+        unsafe_allow_html=True,
+    )
+
+    # Mini chart: history (+cleansed) & forecast with the boundary
+    sales_grp = profile["sales_grp"]
+    fcst_grp = profile["fcst_grp"]
+    iqr_res = profile["metrics"].get("iqr_result")
+
+    fig = go.Figure()
+    if boundary is not None:
+        fig.add_vline(x=boundary, line=dict(color=DARK_MUTED, width=1, dash="dot"))
+    fig.add_trace(go.Scatter(
+        x=sales_grp["Date"], y=sales_grp["Value"], mode="lines+markers",
+        name="Sales History",
+        line=dict(color=SERIES_STYLE[SALES_HISTORY_LABEL]["color"], width=2.4),
+        marker=dict(size=5),
+        hovertemplate="Sales History<br>%{x|%b %Y}<br>%{y:,.0f}<extra></extra>",
+    ))
+    if not fcst_grp.empty:
+        fig.add_trace(go.Scatter(
+            x=fcst_grp["Date"], y=fcst_grp["Value"], mode="lines+markers",
+            name="Statistical Forecast",
+            line=dict(color=SERIES_STYLE[STAT_FORECAST_LABEL]["color"], width=2.4),
+            marker=dict(size=5, symbol="diamond"),
+            hovertemplate="Forecast<br>%{x|%b %Y}<br>%{y:,.0f}<extra></extra>",
+        ))
+    # Trend overlays
+    ht = profile["metrics"].get("hist_trend")
+    ft = profile["metrics"].get("fcst_trend")
+    if ht is not None:
+        fig.add_trace(go.Scatter(
+            x=ht["dates"], y=ht["fit_line"], mode="lines", name="History trend",
+            line=dict(color=HISTORY_TREND_COLOR, width=2, dash="dash"),
+        ))
+    if ft is not None:
+        fig.add_trace(go.Scatter(
+            x=ft["dates"], y=ft["fit_line"], mode="lines", name="Forecast trend",
+            line=dict(color=FORECAST_TREND_COLOR, width=2, dash="dash"),
+        ))
+    # Outlier markers
+    if iqr_res is not None:
+        od = iqr_res[iqr_res["IsOutlier"]]
+        if not od.empty:
+            fig.add_trace(go.Scatter(
+                x=od["Date"], y=od["Value"], mode="markers", name="IQR outlier",
+                marker=dict(color="#ff6b6b", size=12, symbol="x-thin",
+                            line=dict(color="#ff6b6b", width=3)),
+                hovertemplate="Outlier<br>%{x|%b %Y}<br>%{y:,.0f}<extra></extra>",
+            ))
+    dark_layout(
+        fig, title=f"{key} — history, forecast & trends",
+        xaxis_title="Months", yaxis_title="Demand volume in kgs",
+        height=420,
+        legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center",
+                    bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+        margin=dict(t=60, l=60, r=30, b=110),
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+    # Supporting metrics
+    mc1, mc2, mc3 = st.columns(3)
+    h_pct = profile["metrics"].get("hist_pct_per_year")
+    f_pct = profile["metrics"].get("fcst_pct_per_year")
+    corr = profile["metrics"].get("seasonal_corr")
+    mc1.metric("History trend", "–" if h_pct is None else f"{h_pct:+.1f}%/yr")
+    mc2.metric("Forecast trend", "–" if f_pct is None else f"{f_pct:+.1f}%/yr")
+    mc3.metric("Seasonal corr", "–" if corr is None else f"{corr:+.2f}")
+
+    # Root cause + next steps for each applicable reason code
+    st.markdown("#### 🩺 Root cause & recommended next steps")
+    for r in profile["reasons"]:
+        code = r["code"]
+        info = REASON_CODES[code]
+        with st.container(border=True):
+            st.markdown(
+                f"**{info['label']}**  ·  severity {r['severity']:.0f}  ·  "
+                f"_{r['detail']}_"
+            )
+            st.markdown(f"**Root cause:** {info['root_cause']}")
+            st.markdown(f"**Next steps:** {info['next_steps']}")
 
 
 # ---------------------------------------------------------------------------
@@ -1754,14 +2279,18 @@ def main() -> None:
         )
         st.markdown(
             "**This dashboard provides:**\n"
-            "1. An interactive replica of the *Forecast vs Actuals* pivot "
+            "1. An **Anomaly Summary** that ranks the top anomalies per Ship "
+            "To Sub Region, assigns each a reason code (trend reversal, trend "
+            "mismatch, seasonality loss, IQR outliers), and lets you drill "
+            "down to the root cause and recommended next steps.\n"
+            "2. An interactive replica of the *Forecast vs Actuals* pivot "
             "chart with all original slicer filters on top — clearly "
             "splitting **History** vs **Forecast** series, with optional "
             "**trend lines** and an automatic trend interpretation.\n"
-            "2. An **outlier detection & correction** view (choose **IQR** or "
+            "3. An **outlier detection & correction** view (choose **IQR** or "
             "**Sigma**) for the **Sales History** of every Key, producing a "
             "cleansed history alongside the original.\n"
-            "3. A **year-over-year seasonality** view comparing the forecast's "
+            "4. A **year-over-year seasonality** view comparing the forecast's "
             "seasonal shape against the last 3 historical years, with an "
             "automatic interpretation of forecast quality."
         )
@@ -1786,11 +2315,14 @@ def main() -> None:
         st.error("The uploaded file contains no usable rows.")
         st.stop()
 
-    tab1, tab2, tab3 = st.tabs([
+    tab0, tab1, tab2, tab3 = st.tabs([
+        "🧭 Anomaly Summary",
         "📈 Forecast vs Actuals",
         "🚨 Outlier Detection & Correction",
         "📅 Seasonality (YoY)",
     ])
+    with tab0:
+        render_anomaly_tab(long_df)
     with tab1:
         render_dashboard_tab(long_df, uploaded.name)
     with tab2:
