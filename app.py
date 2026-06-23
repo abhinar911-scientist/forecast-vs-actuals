@@ -249,6 +249,23 @@ def logout() -> None:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+# Identifier columns in the RAW Arkieva input file (first sheet). Note this
+# raw file does NOT contain a pre-built "Key" or a separate "Material code"
+# column — the app derives both (see load_excel). "Arkieva Review Req"
+# replaces the old "Stat Flag", and "Arkieva Active Status" is new.
+RAW_ID_COLUMNS: List[str] = [
+    "Business Line",
+    "Material",
+    "Ship To Sub Region",
+    "Arkieva ABC",
+    "Arkieva Pattern",
+    "Arkieva Active Status",
+    "Arkieva Review Req",
+    "Data",
+]
+
+# Columns present AFTER load_excel derives Key and Material code. "Key" and
+# "Material code" are placed at the front of the frame.
 ID_COLUMNS: List[str] = [
     "Key",
     "Business Line",
@@ -257,17 +274,25 @@ ID_COLUMNS: List[str] = [
     "Ship To Sub Region",
     "Arkieva ABC",
     "Arkieva Pattern",
-    "Stat Flag",
+    "Arkieva Active Status",
+    "Arkieva Review Req",
     "Data",
 ]
 
-# Order matches the Excel slicer order
+ACTIVE_STATUS_COL = "Arkieva Active Status"
+# By default the app shows only "Active" and "Sparse" keys.
+DEFAULT_ACTIVE_STATUSES = ["Active", "Sparse"]
+
+# Order matches the Excel slicer order. "Stat Flag" is replaced by
+# "Arkieva Review Req"; "Arkieva Active Status" is added (defaulted to
+# Active + Sparse).
 FILTER_COLUMNS: List[str] = [
     "Business Line",
     "Arkieva ABC",
     "Ship To Sub Region",
     "Material",
-    "Stat Flag",
+    "Arkieva Review Req",
+    "Arkieva Active Status",
     "Arkieva Pattern",
     "Data",
 ]
@@ -380,9 +405,32 @@ def add_time_controls(fig: "go.Figure") -> "go.Figure":
 # ---------------------------------------------------------------------------
 # Data loading & validation
 # ---------------------------------------------------------------------------
+def _extract_material_code(material) -> str:
+    """Pull the numeric material code out of a Material string.
+
+    In the raw Arkieva file the Material column embeds the code after a
+    double underscore, e.g. '2-ETHYL HEXANOL BULK__3000924' -> '3000924'.
+    Falls back to the whole string when there is no '__'.
+    """
+    s = str(material).strip()
+    if "__" in s:
+        return s.rsplit("__", 1)[-1].strip()
+    return s
+
+
 @st.cache_data(show_spinner=False)
 def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd.Timestamp]]:
     """Load and reshape the uploaded workbook.
+
+    Accepts the raw Arkieva export (first sheet) whose identifier columns are
+    RAW_ID_COLUMNS. The app derives:
+      * **Material code** — extracted from the Material string (after '__').
+      * **Key** — ``Business Line_<material code>_Ship To Sub Region`` —
+        placed at the front of the frame, mirroring the legacy input's Key.
+
+    Older files that already contain a built ``Key`` and a ``Stat Flag``
+    column are also accepted (Stat Flag is mapped to ``Arkieva Review Req``;
+    a missing ``Arkieva Active Status`` defaults to 'Active').
 
     Returns a long-format DataFrame ['Key', ..., 'Date', 'Value'] together
     with the sorted list of months found in the file. Raises ValueError
@@ -393,12 +441,37 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"Could not read the Excel file: {exc}") from exc
 
-    missing = [c for c in ID_COLUMNS if c not in raw.columns]
+    raw = raw.copy()
+
+    # ---- Backward compatibility shims --------------------------------------
+    # Legacy files used "Stat Flag" instead of "Arkieva Review Req".
+    if "Arkieva Review Req" not in raw.columns and "Stat Flag" in raw.columns:
+        raw = raw.rename(columns={"Stat Flag": "Arkieva Review Req"})
+    # Legacy files have no active-status column; treat every row as Active.
+    if ACTIVE_STATUS_COL not in raw.columns:
+        raw[ACTIVE_STATUS_COL] = "Active"
+
+    # ---- Validate the raw identifier columns -------------------------------
+    missing = [c for c in RAW_ID_COLUMNS if c not in raw.columns]
     if missing:
         raise ValueError(
-            "The uploaded file is missing required column(s): " + ", ".join(missing)
+            "The uploaded file is missing required column(s): "
+            + ", ".join(missing)
+            + ". Make sure you uploaded the raw Arkieva 'Forecast vs Actuals' "
+            "export (data on the first sheet)."
         )
 
+    # ---- Derive Material code and Key --------------------------------------
+    if "Material code" not in raw.columns:
+        raw["Material code"] = raw["Material"].apply(_extract_material_code)
+    if "Key" not in raw.columns:
+        raw["Key"] = (
+            raw["Business Line"].astype(str).str.strip() + "_"
+            + raw["Material code"].astype(str).str.strip() + "_"
+            + raw["Ship To Sub Region"].astype(str).str.strip()
+        )
+
+    # ---- Identify month/date columns ---------------------------------------
     month_cols = [c for c in raw.columns if c not in ID_COLUMNS]
     parsed_months = []
     for c in month_cols:
@@ -413,7 +486,7 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
     if not parsed_months:
         raise ValueError(
             "No month/date columns found. Expected dated columns such as "
-            "'2023-04-01', '2023-05-01', ..."
+            "'2023-06-01', '2023-07-01', ..."
         )
 
     keep_cols = ID_COLUMNS + [orig for orig, _ in parsed_months]
@@ -429,12 +502,20 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
     long_df["Date"] = pd.to_datetime(long_df["Date"])
     long_df["Value"] = pd.to_numeric(long_df["Value"], errors="coerce")
 
-    # Change 1: normalise the statistical-forecast label. Some files use
+    # Normalise the statistical-forecast label. Some files use
     # "Statistical Forecast Committed (kg)"; map every alias to the canonical
     # "Statistical Forecast (kg)" so the rest of the app is label-agnostic.
     long_df["Data"] = long_df["Data"].astype(str).str.strip()
     long_df["Data"] = long_df["Data"].replace(
         "Statistical Forecast Committed (kg)", STAT_FORECAST_LABEL
+    )
+
+    # Normalise the Arkieva Review Req values to readable strings (the raw
+    # file stores booleans True/False).
+    long_df["Arkieva Review Req"] = (
+        long_df["Arkieva Review Req"].map(
+            {True: "Yes", False: "No", "True": "Yes", "False": "No"}
+        ).fillna(long_df["Arkieva Review Req"].astype(str).str.strip())
     )
 
     for c in FILTER_COLUMNS:
@@ -507,6 +588,7 @@ def render_filter_strip(
     columns: List[str],
     key_prefix: str,
     n_per_row: int = 4,
+    default_selections: Optional[dict] = None,
 ) -> dict:
     """Render a cascading multi-select filter strip above the chart.
 
@@ -519,9 +601,29 @@ def render_filter_strip(
     The pruning is single-pass and proceeds in the declared filter order:
     earlier filters take precedence over later ones when they conflict.
 
+    ``default_selections`` maps a column name to a list of values that should
+    be pre-selected on the FIRST render for this ``key_prefix`` (e.g. the
+    Arkieva Active Status defaulting to Active + Sparse). The defaults are
+    applied only once; afterwards the user's choices — including clearing a
+    filter — are respected. The 🔄 Reset button restores the defaults.
+
     Each tab passes a unique ``key_prefix`` so filter state is
     independent across tabs and Streamlit doesn't see duplicate keys.
     """
+    default_selections = default_selections or {}
+
+    # Apply one-time defaults: only seed a filter's state the very first time
+    # this strip is rendered for this key_prefix (tracked by an init flag).
+    init_flag = f"{key_prefix}::__initialized__"
+    if not st.session_state.get(init_flag, False):
+        for col, default_vals in default_selections.items():
+            state_key = f"{key_prefix}::{col}"
+            if state_key not in st.session_state:
+                # keep only defaults that actually exist in the data
+                valid = [v for v in default_vals if v in set(df[col].astype(str))]
+                st.session_state[state_key] = valid
+        st.session_state[init_flag] = True
+
     # Step 1: read current selections, dropping any value that doesn't even
     # exist in the underlying data (defensive against schema changes).
     current_selections: dict = {}
@@ -575,7 +677,11 @@ def render_filter_strip(
         if st.button("🔄 Reset filters", key=f"{key_prefix}::reset",
                      use_container_width=True):
             for col_name in columns:
-                st.session_state[f"{key_prefix}::{col_name}"] = []
+                # Reset restores defaults (empty if none configured).
+                default_vals = default_selections.get(col_name, [])
+                valid = [v for v in default_vals
+                         if v in set(df[col_name].astype(str))]
+                st.session_state[f"{key_prefix}::{col_name}"] = valid
             st.rerun()
 
     return selections
@@ -1100,80 +1206,57 @@ def interpret_seasonality(analysis: dict) -> Tuple[str, str]:
 REASON_CODES = {
     "TREND_REVERSAL": {
         "label": "Trend reversal",
-        "short": "Forecast trend points the opposite way to history.",
+        "short": "Forecast trends opposite to history.",
         "root_cause": (
-            "The statistical model has inferred a turning point: the forecast "
-            "trends in the opposite direction to the recent sales-history "
-            "trend (e.g. history rising while the forecast falls). This is "
-            "usually driven by (a) a few recent months that broke the prior "
-            "pattern, (b) outliers near the end of history pulling the fit, "
-            "or (c) a model/parameter change at the last regeneration."
+            "Forecast trends opposite to recent history. Usually caused by a "
+            "few recent months breaking the pattern, end-of-history outliers "
+            "pulling the fit, or a model change at regeneration."
         ),
         "next_steps": (
-            "1) Open the Forecast vs Actuals chart for this Key and confirm the "
-            "reversal visually. 2) Check the last 3–6 months of Sales History "
-            "for outliers or one-off events (promotions, stock-outs, returns). "
-            "3) If the reversal is not backed by a real business event, "
-            "override the forecast toward the historical direction or re-run "
-            "after cleansing the recent outliers. 4) If it IS backed by a known "
-            "event (lost customer, new listing), document the assumption."
+            "Confirm the reversal on the chart, check the last 3–6 months for "
+            "outliers/one-off events; if not backed by a real event, override "
+            "toward the historical direction or re-run after cleansing."
         ),
     },
     "TREND_MISMATCH": {
         "label": "Trend magnitude mismatch",
-        "short": "Same direction, but forecast slope is far steeper/flatter.",
+        "short": "Same direction, very different slope.",
         "root_cause": (
-            "History and forecast move the same way, but the forecast's rate of "
-            "change is disproportionate to history (for example, forecast "
-            "growing several times faster than the historical growth rate). "
-            "This often comes from short-history overfitting, an aggressive "
-            "trend smoothing parameter, or recent spikes amplifying the slope."
+            "Same direction as history but a disproportionate rate of change. "
+            "Often short-history overfitting, aggressive trend smoothing, or "
+            "recent spikes amplifying the slope."
         ),
         "next_steps": (
-            "1) Compare the history vs forecast slope (%/yr) shown in the "
-            "drill-down. 2) Sanity-check the implied volume at the end of the "
-            "horizon against business expectations. 3) If unrealistic, dampen "
-            "the trend (trend-damping parameter) or cap growth, then re-run. "
-            "4) Validate against any account/market intelligence before "
-            "committing."
+            "Compare history vs forecast slope, sanity-check end-of-horizon "
+            "volume; if unrealistic, dampen the trend or cap growth and re-run."
         ),
     },
     "SEASONALITY_LOSS": {
         "label": "Seasonality not captured",
-        "short": "History is seasonal but the forecast is (near) flat.",
+        "short": "History seasonal, forecast (near) flat.",
         "root_cause": (
-            "The recent sales history shows a repeating intra-year pattern "
-            "(clear peak and trough months), but the forecast does not "
-            "reproduce that shape. Typical causes: too few history points for "
-            "the model to lock onto seasonality, a non-seasonal model being "
-            "selected, or seasonality being washed out by noise/outliers."
+            "History repeats an intra-year pattern the forecast doesn't "
+            "reproduce. Usually too little history, a non-seasonal model, or "
+            "seasonality washed out by noise/outliers."
         ),
         "next_steps": (
-            "1) Open the Seasonality (YoY) view for this Key and confirm the "
-            "historical peak/trough months. 2) Ensure the model is allowed to "
-            "fit seasonality (seasonal profile / enough history). 3) If history "
-            "is reliable, apply the historical seasonal profile or switch to a "
-            "seasonal model, then re-run. 4) Confirm the seasonality is genuine "
-            "and not driven by a single anomalous year."
+            "Confirm peak/trough months on the Seasonality tab; if history is "
+            "reliable, apply the seasonal profile or switch to a seasonal "
+            "model and re-run."
         ),
     },
     "IQR_OUTLIERS": {
         "label": "Outliers in sales history (IQR)",
-        "short": "Multiple history points violate the IQR fences.",
+        "short": "Several points violate IQR fences.",
         "root_cause": (
-            "The sales history for this Key contains several points outside the "
-            "IQR fences (Q1−1.5·IQR / Q3+1.5·IQR). These spikes/drops are often "
-            "promotions, bulk orders, data-entry errors, stock-outs, or "
-            "returns. Because the statistical forecast is fitted on this "
-            "history, the outliers can distort both the level and the trend."
+            "Sales history has points outside the IQR fences — promotions, "
+            "bulk orders, data errors, stock-outs or returns — which can "
+            "distort the fitted level and trend."
         ),
         "next_steps": (
-            "1) Open the Outlier Detection & Correction tab for this Key. "
-            "2) Review each flagged point against known events. 3) Replace "
-            "genuine anomalies with the cleansed value (median) and re-run the "
-            "forecast on the cleansed history. 4) For recurring causes "
-            "(e.g. monthly promos), consider modelling them explicitly rather "
-            "than treating them as noise."
+            "Review flagged points on the Outlier tab against known events, "
+            "replace genuine anomalies with the cleansed value and re-run; "
+            "model recurring causes explicitly."
         ),
     },
 }
@@ -1406,16 +1489,16 @@ def reset_app_state() -> None:
 # ---------------------------------------------------------------------------
 def render_anomaly_tab(long_df: pd.DataFrame) -> None:
     st.subheader("🧭 Anomaly Summary")
-    st.caption(
-        "Top anomalies per **Ship To Sub Region** with an automatically "
-        "assigned reason code. Use the drill-down to see the root cause and "
-        "recommended next steps for each Key."
-    )
+    st.caption("Top anomalies per Ship To Sub Region, with reason codes. "
+               "Drill down for root cause and next steps.")
 
     # ---- Filters (same set as the Forecast vs Actuals tab) -----------------
     with st.container(border=True):
-        st.markdown("**🔎 Filters** — leave empty to include everything. Filters cascade: each one narrows the choices in the others (Excel-slicer style).")
-        selections = render_filter_strip(long_df, FILTER_COLUMNS, key_prefix="anom")
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
+                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        selections = render_filter_strip(
+            long_df, FILTER_COLUMNS, key_prefix="anom",
+            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     filtered = apply_filters(long_df, selections)
     if filtered.empty:
@@ -1507,7 +1590,7 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
 
     # ---- Drill-down ---------------------------------------------------------
     st.markdown("### 🔬 Drill-down to root cause")
-    st.caption("Select a Key to see the root cause and recommended next steps.")
+    st.caption("Pick a Key for root cause and next steps.")
     key_choices = table.sort_values("Severity", ascending=False)["Key"].tolist()
     if not key_choices:
         return
@@ -1521,9 +1604,8 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
 
 def _render_reason_code_legend() -> None:
     st.markdown(
-        "Each Key's Sales History and Statistical Forecast are analysed and "
-        "assigned one or more **reason codes**. Severity (0–100+) ranks the "
-        "most serious issues first; a Key may carry several codes."
+        "Each Key's Sales History and Statistical Forecast are scored; "
+        "severity ranks the worst first. A Key may carry several codes:"
     )
     for code, info in REASON_CODES.items():
         st.markdown(f"- **{info['label']}** (`{code}`): {info['short']}")
@@ -1641,8 +1723,11 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
 
     # ---- Filter strip on top -----------------------------------------------
     with st.container(border=True):
-        st.markdown("**🔎 Filters** — leave empty to include everything. Filters cascade: each one narrows the choices in the others (Excel-slicer style).")
-        selections = render_filter_strip(long_df, FILTER_COLUMNS, key_prefix="dash")
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
+                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        selections = render_filter_strip(
+            long_df, FILTER_COLUMNS, key_prefix="dash",
+            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
         min_d = long_df["Date"].min().to_pydatetime()
         max_d = long_df["Date"].max().to_pydatetime()
@@ -1846,9 +1931,11 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     outlier_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
 
     with st.container(border=True):
-        st.markdown("**🔎 Filters** — leave empty to include everything. Filters cascade: each one narrows the choices in the others (Excel-slicer style).")
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
+                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
         selections = render_filter_strip(
             sales, outlier_filter_cols, key_prefix="outlier",
+            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES},
         )
 
     sales_f = apply_filters(sales, selections)
@@ -2130,9 +2217,11 @@ def render_seasonality_tab(long_df: pd.DataFrame) -> None:
     # ---- Filter strip (same six as the outlier tab) ------------------------
     season_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
     with st.container(border=True):
-        st.markdown("**🔎 Filters** — leave empty to include everything. Filters cascade: each one narrows the choices in the others (Excel-slicer style).")
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
+                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
         selections = render_filter_strip(
             long_df, season_filter_cols, key_prefix="season",
+            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES},
         )
 
     filtered = apply_filters(long_df, selections)
