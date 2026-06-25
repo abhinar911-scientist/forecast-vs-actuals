@@ -118,30 +118,10 @@ A faithful reproduction of the original Excel pivot dashboard:
   trend direction and flagging implausibly steep forecast growth.
 - KPI cards (unique Keys, Materials, Months, Total volume).
 
-### Tab 3 — Statistical Forecast Adoption %
-Shows how much demand volume is being driven by the **statistical
-forecast** rather than requiring manual review.
-
-- A material + Ship To Sub Region combination is counted as **on the
-  Statistical Forecast** only when **`Arkieva Review Req` = No** AND its
-  **`Arkieva Active Status`** is **Active** or **Sparse**.
-- The metric is *adoption %* = on-stat Statistical-Forecast volume ÷ total
-  Statistical-Forecast volume, **partitioned by fiscal year (Jan–Dec)**.
-- Uses the **same cascading filters** as the other tabs, with Arkieva
-  Active Status defaulting to **Active + Sparse**. Every chart reacts
-  instantly to filter changes.
-- Visuals: an adoption-by-fiscal-year bar+trend combo, grouped bar charts
-  **by Business Line** and **by Ship To Sub Region**, and a Business
-  Line × year **heatmap**.
-- At the bottom, an **interactive table of the materials on Statistical
-  Forecast** (Material + Ship To Sub Region, with forecast volume per
-  fiscal year), filtered live by the selections above and exportable to
-  CSV.
-
-### Tab 4 — Outlier Detection & Correction (IQR or Sigma)
+### Tab 3 — Outlier Detection & Correction (IQR or Sigma)
 - The **same six cascading filters at the top** (the *Data* filter is
   omitted because this view is intrinsically scoped to *Sales History
-  (kg)*). Filter state is independent from Tab 1.
+  (kg)*). Filter state is independent per tab.
 - **Choose one of two methods**:
   - **IQR (Tukey's fences)** — flags points outside
     `[Q1 − k·IQR, Q3 + k·IQR]` and corrects each to the series **median**.
@@ -157,7 +137,7 @@ forecast** rather than requiring manual review.
 - A table of all corrected outliers and CSV exports of the cleansed
   history (per-Key and all-Keys).
 
-### Tab 5 — Year-over-Year Seasonality
+### Tab 4 — Year-over-Year Seasonality
 - Compares the **monthly seasonal shape** of the last **3 historical
   years** of Sales History against the forecast period. Each line is a
   seasonal index (1.0 = that period's average; 1.10 = ~10% above average).
@@ -168,6 +148,42 @@ forecast** rather than requiring manual review.
   trough months, and tells you whether the forecast preserves seasonality
   (≥ 0.7 = strong match), partially matches, diverges, or is flat where
   history is seasonal.
+
+### Tab 5 — Statistical Forecast Adoption %
+The **last tab**. Shows how much demand volume is being driven by the
+**statistical forecast** rather than requiring manual review.
+
+- **On-stat definition (granular level):** the granular unit is Business
+  Line + Material + Ship To Sub Region + Arkieva Active Status. A
+  combination is **on the Statistical Forecast** only when
+  **`Arkieva Review Req` = No** AND its **`Arkieva Active Status`** is
+  **Active** or **Sparse**.
+- **Adoption % (region-based denominator):**
+
+  ```
+  Adoption = Σ on-stat forecast
+             ──────────────────────────────────────────
+             Σ total forecast of the same Ship To Sub Region
+  ```
+
+  Higher-level views (overall, by Business Line) roll up these granular
+  numerators and denominators.
+- **Active year onwards only:** the app finds the **active year** — the
+  calendar year of the last active month in **Sales History (kg)** — and
+  computes adoption for that year and every **future** year. Past years
+  (whose forecast is already historical) are excluded. The active year is
+  shown at the top of the tab.
+- Uses the **same cascading filters** as the other tabs, with Arkieva
+  Active Status defaulting to **Active + Sparse**. Every chart reacts
+  instantly to filter changes.
+- Visuals: an adoption-by-fiscal-year bar+trend combo, grouped bar charts
+  **by Business Line** and **by Ship To Sub Region**, and a Business
+  Line × year **heatmap**.
+- At the bottom, an **interactive table** of the granular combinations on
+  the Statistical Forecast (Business Line + Material + Ship To Sub Region +
+  Active Status), with forecast volume per fiscal year and each
+  combination's share of its Ship To Sub Region's total forecast — filtered
+  live by the selections above and exportable to CSV.
 
 ### Input normalisation
 - The statistical-forecast line may appear in the input as either
