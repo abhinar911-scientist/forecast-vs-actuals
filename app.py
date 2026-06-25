@@ -283,6 +283,13 @@ ACTIVE_STATUS_COL = "Arkieva Active Status"
 # By default the app shows only "Active" and "Sparse" keys.
 DEFAULT_ACTIVE_STATUSES = ["Active", "Sparse"]
 
+REVIEW_REQ_COL = "Arkieva Review Req"
+# A material + Ship To Sub Region combination is considered to be running on
+# the Statistical Forecast only when it does NOT require review and its
+# active status is Active or Sparse.
+ON_STAT_REVIEW_VALUE = "No"
+ON_STAT_STATUSES = ["Active", "Sparse"]
+
 # Order matches the Excel slicer order. "Stat Flag" is replaced by
 # "Arkieva Review Req"; "Arkieva Active Status" is added (defaulted to
 # Active + Sparse).
@@ -1473,6 +1480,94 @@ def build_anomaly_summary(filtered_df: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
+# Statistical Forecast Adoption
+# ---------------------------------------------------------------------------
+def compute_stat_adoption(
+    filtered_df: pd.DataFrame,
+    group_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Compute the % of Statistical-Forecast volume that is *on* the
+    statistical forecast, partitioned by fiscal year (Jan–Dec).
+
+    A material + Ship To Sub Region combination is "on Statistical Forecast"
+    when ``Arkieva Review Req == 'No'`` AND its ``Arkieva Active Status`` is
+    Active or Sparse. The metric measures, within the Statistical Forecast
+    (kg) series, what share of volume comes from such combinations.
+
+    * Numerator  = Statistical-Forecast volume from on-stat combinations.
+    * Denominator = total Statistical-Forecast volume (the demand base).
+
+    When ``group_col`` is given (e.g. "Business Line" or "Ship To Sub
+    Region"), the result is broken down by that column as well as by year;
+    otherwise it is by year only.
+
+    Returns a tidy DataFrame with columns:
+    [Year, (group_col), OnStatVolume, TotalVolume, AdoptionPct].
+    """
+    stat = filtered_df[filtered_df["Data"] == STAT_FORECAST_LABEL].copy()
+    stat = stat.dropna(subset=["Value"])
+    if stat.empty:
+        cols = ["Year"] + ([group_col] if group_col else []) + \
+               ["OnStatVolume", "TotalVolume", "AdoptionPct"]
+        return pd.DataFrame(columns=cols)
+
+    stat["Year"] = pd.to_datetime(stat["Date"]).dt.year
+    stat["_on_stat"] = (
+        (stat[REVIEW_REQ_COL] == ON_STAT_REVIEW_VALUE)
+        & (stat[ACTIVE_STATUS_COL].isin(ON_STAT_STATUSES))
+    )
+    stat["_on_stat_vol"] = np.where(stat["_on_stat"], stat["Value"], 0.0)
+
+    group_keys = ["Year"] + ([group_col] if group_col else [])
+    agg = stat.groupby(group_keys, as_index=False).agg(
+        OnStatVolume=("_on_stat_vol", "sum"),
+        TotalVolume=("Value", "sum"),
+    )
+    agg["AdoptionPct"] = np.where(
+        agg["TotalVolume"] != 0,
+        agg["OnStatVolume"] / agg["TotalVolume"] * 100.0,
+        0.0,
+    )
+    return agg.sort_values(group_keys).reset_index(drop=True)
+
+
+def stat_adoption_material_table(filtered_df: pd.DataFrame) -> pd.DataFrame:
+    """Build the per-(Material, Ship To Sub Region) table of combinations that
+    are on the Statistical Forecast, with their per-year forecast volume.
+
+    Only combinations meeting the on-stat criteria (Review Req == No and
+    Active/Sparse) are included. Returns one row per Material + Ship To Sub
+    Region with descriptive columns and a volume column per fiscal year.
+    """
+    stat = filtered_df[filtered_df["Data"] == STAT_FORECAST_LABEL].copy()
+    stat = stat.dropna(subset=["Value"])
+    on = stat[
+        (stat[REVIEW_REQ_COL] == ON_STAT_REVIEW_VALUE)
+        & (stat[ACTIVE_STATUS_COL].isin(ON_STAT_STATUSES))
+    ].copy()
+    if on.empty:
+        return pd.DataFrame()
+
+    on["Year"] = pd.to_datetime(on["Date"]).dt.year
+
+    # Per-year volume pivot per Material + Region.
+    id_cols = ["Business Line", "Material", "Material code",
+               "Ship To Sub Region", "Arkieva ABC", "Arkieva Pattern",
+               ACTIVE_STATUS_COL]
+    id_cols = [c for c in id_cols if c in on.columns]
+
+    year_pivot = (on.groupby(id_cols + ["Year"], as_index=False)["Value"].sum()
+                  .pivot_table(index=id_cols, columns="Year",
+                               values="Value", aggfunc="sum", fill_value=0.0))
+    year_pivot.columns = [f"FY {int(c)}" for c in year_pivot.columns]
+    year_cols = list(year_pivot.columns)
+    year_pivot["Total volume (kg)"] = year_pivot[year_cols].sum(axis=1)
+    out = year_pivot.reset_index().sort_values(
+        "Total volume (kg)", ascending=False).reset_index(drop=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Reset on file removal
 # ---------------------------------------------------------------------------
 def reset_app_state() -> None:
@@ -2324,6 +2419,188 @@ def render_seasonality_tab(long_df: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# UI – Tab: Statistical Forecast Adoption %
+# ---------------------------------------------------------------------------
+def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
+    st.subheader("📦 Statistical Forecast Adoption %")
+    st.caption(
+        "Share of Statistical-Forecast volume that is **on** the statistical "
+        "forecast (Arkieva Review Req = No and Active/Sparse status), by "
+        "fiscal year (Jan–Dec), Business Line and Ship To Sub Region."
+    )
+
+    # ---- Filters (same set + Active/Sparse default) ------------------------
+    with st.container(border=True):
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
+                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        selections = render_filter_strip(
+            long_df, FILTER_COLUMNS, key_prefix="adopt",
+            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
+
+    filtered = apply_filters(long_df, selections)
+    if filtered.empty:
+        st.warning("No data matches the current filter combination.")
+        return
+
+    stat_rows = filtered[filtered["Data"] == STAT_FORECAST_LABEL]
+    if stat_rows.dropna(subset=["Value"]).empty:
+        st.info("No Statistical Forecast volume for the current filter selection.")
+        return
+
+    # ---- Overall metric -----------------------------------------------------
+    overall = compute_stat_adoption(filtered, group_col=None)
+    grand_on = overall["OnStatVolume"].sum()
+    grand_tot = overall["TotalVolume"].sum()
+    grand_pct = (grand_on / grand_tot * 100) if grand_tot else 0.0
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Overall adoption", f"{grand_pct:.1f}%")
+    m2.metric("On-stat volume (kg)", f"{grand_on:,.0f}")
+    m3.metric("Total forecast volume (kg)", f"{grand_tot:,.0f}")
+
+    # ---- Adoption % by fiscal year (line + bar combo) ----------------------
+    st.markdown("### 📈 Adoption % by fiscal year")
+    year_df = overall.copy()
+    if not year_df.empty:
+        year_df["YearLabel"] = year_df["Year"].astype(int).astype(str)
+        fig_year = go.Figure()
+        fig_year.add_trace(go.Bar(
+            x=year_df["YearLabel"], y=year_df["AdoptionPct"],
+            name="Adoption %", marker=dict(color="#4da3ff"),
+            text=[f"{v:.1f}%" for v in year_df["AdoptionPct"]],
+            textposition="outside",
+            hovertemplate="FY %{x}<br>Adoption: %{y:.1f}%<extra></extra>",
+        ))
+        fig_year.add_trace(go.Scatter(
+            x=year_df["YearLabel"], y=year_df["AdoptionPct"],
+            name="Trend", mode="lines+markers",
+            line=dict(color="#ffa94d", width=2.5),
+            marker=dict(size=7),
+            hovertemplate="FY %{x}<br>%{y:.1f}%<extra></extra>",
+        ))
+        dark_layout(
+            fig_year, title="Statistical Forecast adoption by fiscal year",
+            xaxis_title="Fiscal year (Jan–Dec)", yaxis_title="Adoption %",
+            height=380,
+            legend=dict(orientation="h", y=-0.25, x=0.5, xanchor="center",
+                        bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+            margin=dict(t=60, l=60, r=30, b=80),
+        )
+        fig_year.update_yaxes(ticksuffix="%", rangemode="tozero")
+        st.plotly_chart(fig_year, use_container_width=True,
+                        config={"displaylogo": False})
+
+    # ---- By Business Line and by Ship To Sub Region (grouped bars) ----------
+    bcol, rcol = st.columns(2)
+
+    with bcol:
+        st.markdown("### 🏭 By Business Line")
+        bl_df = compute_stat_adoption(filtered, group_col="Business Line")
+        if bl_df.empty:
+            st.info("No data.")
+        else:
+            bl_df["YearLabel"] = bl_df["Year"].astype(int).astype(str)
+            fig_bl = go.Figure()
+            for bl in sorted(bl_df["Business Line"].unique()):
+                sub = bl_df[bl_df["Business Line"] == bl]
+                fig_bl.add_trace(go.Bar(
+                    x=sub["YearLabel"], y=sub["AdoptionPct"], name=str(bl),
+                    hovertemplate=f"<b>{bl}</b><br>FY %{{x}}<br>"
+                                  "%{y:.1f}%<extra></extra>",
+                ))
+            dark_layout(
+                fig_bl, title="Adoption % by Business Line",
+                xaxis_title="Fiscal year", yaxis_title="Adoption %",
+                height=400, barmode="group",
+                legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center",
+                            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+                margin=dict(t=60, l=50, r=20, b=110),
+            )
+            fig_bl.update_yaxes(ticksuffix="%", rangemode="tozero")
+            st.plotly_chart(fig_bl, use_container_width=True,
+                            config={"displaylogo": False})
+
+    with rcol:
+        st.markdown("### 🌍 By Ship To Sub Region")
+        rg_df = compute_stat_adoption(filtered, group_col="Ship To Sub Region")
+        if rg_df.empty:
+            st.info("No data.")
+        else:
+            rg_df["YearLabel"] = rg_df["Year"].astype(int).astype(str)
+            fig_rg = go.Figure()
+            for rg in sorted(rg_df["Ship To Sub Region"].unique()):
+                sub = rg_df[rg_df["Ship To Sub Region"] == rg]
+                fig_rg.add_trace(go.Bar(
+                    x=sub["YearLabel"], y=sub["AdoptionPct"], name=str(rg),
+                    hovertemplate=f"<b>{rg}</b><br>FY %{{x}}<br>"
+                                  "%{y:.1f}%<extra></extra>",
+                ))
+            dark_layout(
+                fig_rg, title="Adoption % by Ship To Sub Region",
+                xaxis_title="Fiscal year", yaxis_title="Adoption %",
+                height=400, barmode="group",
+                legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center",
+                            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+                margin=dict(t=60, l=50, r=20, b=110),
+            )
+            fig_rg.update_yaxes(ticksuffix="%", rangemode="tozero")
+            st.plotly_chart(fig_rg, use_container_width=True,
+                            config={"displaylogo": False})
+
+    # ---- Heatmap: Business Line × Year ------------------------------------
+    bl_df_h = compute_stat_adoption(filtered, group_col="Business Line")
+    if not bl_df_h.empty and bl_df_h["Business Line"].nunique() > 1:
+        st.markdown("### 🔥 Adoption % heatmap — Business Line × fiscal year")
+        pivot = bl_df_h.pivot(index="Business Line", columns="Year",
+                              values="AdoptionPct").sort_index()
+        fig_hm = go.Figure(go.Heatmap(
+            z=pivot.values,
+            x=[str(int(c)) for c in pivot.columns],
+            y=pivot.index.tolist(),
+            colorscale="Blues", zmin=0,
+            text=[[f"{v:.0f}%" if pd.notna(v) else "" for v in row]
+                  for row in pivot.values],
+            texttemplate="%{text}", textfont=dict(color="#0e1117"),
+            hovertemplate="%{y}<br>FY %{x}<br>%{z:.1f}%<extra></extra>",
+            colorbar=dict(title="%"),
+        ))
+        dark_layout(
+            fig_hm, title="", xaxis_title="Fiscal year",
+            yaxis_title="Business Line", height=300,
+            margin=dict(t=20, l=120, r=30, b=50),
+        )
+        st.plotly_chart(fig_hm, use_container_width=True,
+                        config={"displaylogo": False})
+
+    # ---- Materials on Statistical Forecast (interactive table) -------------
+    st.markdown("### 📋 Materials on Statistical Forecast")
+    st.caption(
+        "Material + Ship To Sub Region combinations currently on the "
+        "Statistical Forecast (Review Req = No and Active/Sparse), with "
+        "forecast volume per fiscal year. Reacts to the filters above."
+    )
+    mat_table = stat_adoption_material_table(filtered)
+    if mat_table.empty:
+        st.info("No material combinations are on the Statistical Forecast for "
+                "the current filter selection.")
+    else:
+        st.caption(f"**{len(mat_table):,}** material + region combination(s) "
+                   "on Statistical Forecast.")
+        fmt_cols = [c for c in mat_table.columns
+                    if c.startswith("FY ") or c == "Total volume (kg)"]
+        st.dataframe(
+            mat_table.style.format({c: "{:,.0f}" for c in fmt_cols}, na_rep="–"),
+            use_container_width=True, hide_index=True, height=420,
+        )
+        csv = mat_table.to_csv(index=False)
+        st.download_button(
+            "⬇️ Download materials on Statistical Forecast (CSV)",
+            data=csv, file_name="materials_on_stat_forecast.csv",
+            mime="text/csv", key="adopt::dl",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main entry-point
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -2376,10 +2653,13 @@ def main() -> None:
             "chart with all original slicer filters on top — clearly "
             "splitting **History** vs **Forecast** series, with optional "
             "**trend lines** and an automatic trend interpretation.\n"
-            "3. An **outlier detection & correction** view (choose **IQR** or "
+            "3. A **Statistical Forecast Adoption %** view showing the share "
+            "of volume on statistical forecast by fiscal year, Business Line "
+            "and Ship To Sub Region, with the underlying materials table.\n"
+            "4. An **outlier detection & correction** view (choose **IQR** or "
             "**Sigma**) for the **Sales History** of every Key, producing a "
             "cleansed history alongside the original.\n"
-            "4. A **year-over-year seasonality** view comparing the forecast's "
+            "5. A **year-over-year seasonality** view comparing the forecast's "
             "seasonal shape against the last 3 historical years, with an "
             "automatic interpretation of forecast quality."
         )
@@ -2404,9 +2684,10 @@ def main() -> None:
         st.error("The uploaded file contains no usable rows.")
         st.stop()
 
-    tab0, tab1, tab2, tab3 = st.tabs([
+    tab0, tab1, tab4, tab2, tab3 = st.tabs([
         "🧭 Anomaly Summary",
         "📈 Forecast vs Actuals",
+        "📦 Statistical Forecast Adoption %",
         "🚨 Outlier Detection & Correction",
         "📅 Seasonality (YoY)",
     ])
@@ -2414,6 +2695,8 @@ def main() -> None:
         render_anomaly_tab(long_df)
     with tab1:
         render_dashboard_tab(long_df, uploaded.name)
+    with tab4:
+        render_stat_adoption_tab(long_df)
     with tab2:
         render_outlier_tab(long_df)
     with tab3:
