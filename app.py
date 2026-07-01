@@ -2229,12 +2229,33 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
                      "Arkieva Active Status", "CurrentSTF", "Lag1STF",
                      "STF Variance", "Absolute STF Variance"]
         disp_cols = [c for c in disp_cols if c in show.columns]
+
+        # Red gradient on the Absolute STF Variance column, computed in pure
+        # Python (no matplotlib dependency, which isn't installed on
+        # Streamlit Cloud). Darker red = larger absolute variance.
+        _abs = show["Absolute STF Variance"]
+        _amin, _amax = float(_abs.min()), float(_abs.max())
+
+        def _red_shade(col: pd.Series) -> list:
+            styles = []
+            for v in col:
+                if _amax > _amin:
+                    frac = (float(v) - _amin) / (_amax - _amin)
+                else:
+                    frac = 0.0
+                # interpolate white → strong red; keep text readable
+                r = 255
+                g = int(round(255 * (1 - 0.72 * frac)))
+                b = int(round(255 * (1 - 0.72 * frac)))
+                text = "#ffffff" if frac > 0.6 else "#0e1117"
+                styles.append(f"background-color: rgb({r},{g},{b}); color: {text};")
+            return styles
+
         st.dataframe(
             show[disp_cols].style.format({
                 "CurrentSTF": "{:,.0f}", "Lag1STF": "{:,.0f}",
                 "STF Variance": "{:+.1f}%", "Absolute STF Variance": "{:.1f}%",
-            }).background_gradient(subset=["Absolute STF Variance"],
-                                   cmap="Reds"),
+            }).apply(_red_shade, subset=["Absolute STF Variance"]),
             use_container_width=True, hide_index=True, height=380,
         )
         csv = exceptions.to_csv(index=False)
