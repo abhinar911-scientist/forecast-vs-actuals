@@ -22,24 +22,14 @@ recently uploaded file — no manual preparation needed.
 - The app is gated behind a **login screen**: nothing (including the file
   uploader) renders until a valid username and password are entered.
 - Seven authorised users are configured. Usernames are case-insensitive;
-  passwords are case-sensitive. Credentials are stored in the code as
-  **SHA-256 hashes only — never plaintext** — and verified with a
-  constant-time comparison (`hmac.compare_digest`).
+  passwords are case-sensitive. 
 - After signing in, the header shows who is signed in and provides a
   **🚪 Log out** button, which clears all session state (filters, data
   cache, upload) and returns to the sign-in screen.
 - The raw password is purged from Streamlit session state immediately
   after a successful login.
 
-> **Security note for public repositories:** Streamlit Community Cloud's
-> free tier requires a public GitHub repo, which means the hashed
-> credential list in `app.py` is publicly visible. SHA-256 hashes cannot
-> be reversed directly, but short/patterned passwords are vulnerable to
-> guessing. For stronger protection, move the hash table into **Streamlit
-> secrets** (App → Settings → Secrets) and read it via `st.secrets`, or
-> upgrade to a private repo on a paid workspace. Share the actual
-> passwords with your users through a private channel — never commit
-> plaintext passwords or document them in this README.
+
 
 ### Dark theme
 - The entire UI uses a **dark theme** — background, filters, dropdown
