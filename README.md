@@ -2,11 +2,11 @@
 
 A production-grade, **dark-themed** Streamlit application that replicates
 the Excel **"Forecast vs Actuals" pivot dashboard** and adds an
-**Anomaly Summary** triage view, a **Statistical Forecast Adoption %**
-view, interactive **outlier detection & correction** (IQR or Sigma),
-**trend analysis**, and **year-over-year seasonality** views — each with
-automatic, plain-language interpretations of forecast quality and
-recommended next steps.
+**Anomaly Summary** triage view, an **STF Variation & Exceptions** view, a
+**Statistical Forecast Adoption %** view, interactive **outlier detection
+& correction** (IQR or Sigma), **trend analysis**, and **year-over-year
+seasonality** views — each with automatic, plain-language interpretations
+of forecast quality and recommended next steps.
 
 The app is designed for Demand Planners to use directly: **download the
 raw "Forecast vs Actuals" export from Arkieva and upload it as-is** (the
@@ -23,9 +23,23 @@ recently uploaded file — no manual preparation needed.
   uploader) renders until a valid username and password are entered.
 - Seven authorised users are configured. Usernames are case-insensitive;
   passwords are case-sensitive. Credentials are stored in the code as
+  **SHA-256 hashes only — never plaintext** — and verified with a
+  constant-time comparison (`hmac.compare_digest`).
 - After signing in, the header shows who is signed in and provides a
   **🚪 Log out** button, which clears all session state (filters, data
   cache, upload) and returns to the sign-in screen.
+- The raw password is purged from Streamlit session state immediately
+  after a successful login.
+
+> **Security note for public repositories:** Streamlit Community Cloud's
+> free tier requires a public GitHub repo, which means the hashed
+> credential list in `app.py` is publicly visible. SHA-256 hashes cannot
+> be reversed directly, but short/patterned passwords are vulnerable to
+> guessing. For stronger protection, move the hash table into **Streamlit
+> secrets** (App → Settings → Secrets) and read it via `st.secrets`, or
+> upgrade to a private repo on a paid workspace. Share the actual
+> passwords with your users through a private channel — never commit
+> plaintext passwords or document them in this README.
 
 ### Dark theme
 - The entire UI uses a **dark theme** — background, filters, dropdown
@@ -80,7 +94,41 @@ Each detected issue gets a severity contribution (scaled by magnitude /
 count); the Key's overall score is the strongest issue plus a small bonus
 for multiple concurrent issues. Keys with no issues are omitted.
 
-### Tab 2 — Forecast vs Actuals
+### Tab 2 — STF Variation & Exceptions
+Compares the current **Statistical Forecast Committed (kg)** against the
+**Statistical Forecast Committed Lag 1 (kg)** line (the prior cycle's
+committed forecast), to surface where the forecast has moved.
+
+- **Variance** = (Current − Lag 1) / Lag 1, computed per Key over a horizon,
+  reported as both signed **STF Variance** and **Absolute STF Variance**,
+  sorted high → low by the absolute value.
+- **Month 4 (M4) auto-detection:** the "current month" is the last active
+  month in Sales History; **M4 = current + 4**. (e.g. current = June →
+  M1 July, M2 Aug, M3 Sep, **M4 October**.) M4 is re-detected every time a
+  file is loaded.
+- **Two horizons**, both starting at M4:
+  - **M4 → fiscal year-end** — M4 through December of M4's year
+    (fiscal year is Jan–Dec). e.g. Oct–Dec.
+  - **M4 → next 12 months** — M4 plus the following 11 months (12 total).
+- A **sliding window** slider shortens either horizon from the far end
+  (M4 always stays the start).
+- An **Absolute STF variation threshold** slider (default **5%**) flags
+  exception Keys; the tab lists the **top 25** Keys above the threshold,
+  with a red-gradient table, a variance bar chart, and a **month-level
+  heatmap** that highlights *which months* drive each Key's variation.
+- A **waterfall chart** decomposes the net STF change (Current − Lag 1)
+  into driver buckets — **new item / distribution added**, **trend up**,
+  **trend down**, and **disco / distribution loss** — rolled up across the
+  current filter selection, with a drill-down to any single Key. The bucket
+  deltas reconcile exactly to the net change.
+- Uses the **same cascading filters** as *Forecast vs Actuals*, with
+  Arkieva Active Status defaulting to Active + Sparse. Every visual reacts
+  to the filters.
+
+  If the uploaded file has no Lag 1 line, the tab explains that variance
+  can't be computed and points to the raw Arkieva export that includes it.
+
+### Tab 3 — Forecast vs Actuals
 A faithful reproduction of the original Excel pivot dashboard:
 
 - **All eight multi-select cascading filters at the top of the page**
@@ -104,7 +152,7 @@ A faithful reproduction of the original Excel pivot dashboard:
   trend direction and flagging implausibly steep forecast growth.
 - KPI cards (unique Keys, Materials, Months, Total volume).
 
-### Tab 3 — Outlier Detection & Correction (IQR or Sigma)
+### Tab 4 — Outlier Detection & Correction (IQR or Sigma)
 - The **same six cascading filters at the top** (the *Data* filter is
   omitted because this view is intrinsically scoped to *Sales History
   (kg)*). Filter state is independent per tab.
@@ -123,7 +171,7 @@ A faithful reproduction of the original Excel pivot dashboard:
 - A table of all corrected outliers and CSV exports of the cleansed
   history (per-Key and all-Keys).
 
-### Tab 4 — Year-over-Year Seasonality
+### Tab 5 — Year-over-Year Seasonality
 - Compares the **monthly seasonal shape** of the last **3 historical
   years** of Sales History against the forecast period. Each line is a
   seasonal index (1.0 = that period's average; 1.10 = ~10% above average).
@@ -135,7 +183,7 @@ A faithful reproduction of the original Excel pivot dashboard:
   (≥ 0.7 = strong match), partially matches, diverges, or is flat where
   history is seasonal.
 
-### Tab 5 — Statistical Forecast Adoption %
+### Tab 6 — Statistical Forecast Adoption %
 The **last tab**. Shows how much demand volume is being driven by the
 **statistical forecast** rather than requiring manual review.
 
@@ -182,12 +230,61 @@ The **last tab**. Shows how much demand volume is being driven by the
 - **Auto-reset** when the uploaded file is removed or replaced.
 - **Independent cascading filter state per tab.**
 - **Robust validation** with clear error messages.
-- **Caching** for instant filter changes.
 - **Determinism**: all results are reproducible.
+- **Performance:** the wide file is reshaped once and cached; the value
+  column is stored as 32-bit floats to roughly halve memory; every heavy
+  computation (anomaly scan, STF variance/drivers, adoption roll-ups,
+  outlier correction) is wrapped in `@st.cache_data`, so repeat renders and
+  tab switches are instant for a given filter selection. The anomaly scan
+  also pre-filters to Keys with enough history before the per-Key work.
 
 ---
 
+## Expected input file format
 
+Upload the **raw Arkieva "Forecast vs Actuals" export** directly — the
+required data is always on the **first sheet**. The first sheet must
+contain these identifier columns followed by month/date columns (one
+column per month):
+
+| Raw identifier columns | Date columns |
+|---|---|
+| `Business Line`, `Material`, `Ship To Sub Region`, `Arkieva ABC`, `Arkieva Pattern`, `Arkieva Active Status`, `Arkieva Review Req`, `Data` | `2023-06-01`, `2023-07-01`, …, `2028-05-01` |
+
+The app **derives** two columns automatically and places them at the
+front, so you do not need to prepare them:
+
+- **Material code** — extracted from the `Material` string (the part after
+  the double underscore, e.g. `2-ETHYL HEXANOL BULK__3000924` → `3000924`).
+- **Key** — built as `Business Line_<material code>_Ship To Sub Region`
+  (e.g. `Cleaning__BL02_3000924_North America`).
+
+`Data` should take the values: `Sales History (kg)`,
+`History For Forecast (kg)`, `Statistical Forecast (kg)` *(or
+"Statistical Forecast Committed (kg)", which is auto-normalised)*,
+`Statistical Forecast Committed Lag 1 (kg)` *(the prior cycle's committed
+forecast, used by the STF Variation & Exceptions tab)*, and
+`Final Demand Plan Lag 1 (kg)`.
+
+**Notes on the new columns:**
+- **Arkieva Review Req** replaces the legacy *Stat Flag*; boolean
+  `True`/`False` values are shown as `Yes`/`No`.
+- **Arkieva Active Status** is a new filter. The app **defaults to showing
+  only `Active` and `Sparse` keys**; clear or change the filter on any tab
+  to include other statuses (`Inactive`, `Obsolete`, `New Combination`,
+  `Active New`, `-`). The 🔄 Reset button restores the Active + Sparse
+  default.
+
+> The same `Business Line_code_region` Key can appear with several
+> `Arkieva Active Status` rows (each carrying its own monthly values); the
+> default Active + Sparse filter plus the app's summing aggregation handle
+> this correctly.
+
+Older exports that already contain a built `Key` and a `Stat Flag` column
+are still accepted (Stat Flag is mapped to *Arkieva Review Req*; a missing
+*Arkieva Active Status* defaults to `Active`).
+
+---
 
 ## Method notes
 
@@ -339,6 +436,19 @@ Streamlit detects the push and rebuilds within a minute.
 
 > Commit the `.streamlit/config.toml` file too — it is what makes the
 > deployed app dark-themed from the first paint.
+
+---
+
+## How filters cascade
+
+The filters behave like Excel slicers: selecting values in one narrows
+the options in every other, the active filter still shows all values
+consistent with the others, and stale selections are silently pruned
+(earlier filters dominate, in the order Business Line → Arkieva ABC →
+Ship To Sub Region → Material → Arkieva Review Req → Arkieva Active Status
+→ Arkieva Pattern → Data). The 🔄 **Reset filters** button restores the
+defaults (Arkieva Active Status → Active + Sparse) and clears every other
+selection on that tab.
 
 ---
 

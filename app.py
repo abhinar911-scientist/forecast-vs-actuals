@@ -308,6 +308,13 @@ SALES_HISTORY_LABEL = "Sales History (kg)"
 HISTORY_FOR_FORECAST_LABEL = "History For Forecast (kg)"
 STAT_FORECAST_LABEL = "Statistical Forecast (kg)"
 
+# STF (Statistical Forecast Committed) current vs Lag 1 — used by the
+# "STF Variation & Exceptions" tab. The current committed line is normalised
+# to STAT_FORECAST_LABEL on load, so that label IS the current STF here. The
+# Lag 1 line keeps its own label (it must NOT be normalised away).
+STF_CURRENT_LABEL = STAT_FORECAST_LABEL
+STF_LAG1_LABEL = "Statistical Forecast Committed Lag 1 (kg)"
+
 # Some input files label the statistical-forecast line as
 # "Statistical Forecast Committed (kg)". Any of these aliases is normalised
 # to the canonical STAT_FORECAST_LABEL when the file is loaded.
@@ -530,6 +537,13 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
             long_df[c] = long_df[c].astype(str).str.strip()
         else:
             long_df[c] = long_df[c].astype(str)
+
+    # Performance: downcast the value column to a 32-bit float to roughly
+    # halve memory and speed up the numeric aggregations every tab performs.
+    # (String columns are left as object on purpose: converting them to
+    # 'category' triggers pandas' "all categories" groupby behaviour, which
+    # would make per-Key loops iterate over absent Keys.)
+    long_df["Value"] = long_df["Value"].astype("float32")
 
     sorted_months = sorted({ts for _, ts in parsed_months})
     return long_df, sorted_months
@@ -1075,14 +1089,21 @@ def monthly_seasonality_profile(dates, values) -> Optional[pd.Series]:
     """Return a length-12 seasonal index (mean-normalised) indexed by month
     number 1..12, or None if insufficient data. A value of 1.10 means that
     month runs ~10% above the series average."""
-    d = pd.DataFrame({"Date": pd.to_datetime(dates), "Value": values}).dropna()
-    if d.empty:
+    # Avoid a redundant pd.to_datetime when the input is already datetime
+    # (it is, post-load); this function is called thousands of times in the
+    # per-Key anomaly scan, so the conversion cost adds up.
+    dt = dates if pd.api.types.is_datetime64_any_dtype(
+        getattr(dates, "dtype", None)) else pd.to_datetime(dates)
+    vals = np.asarray(values, dtype="float64")
+    mask = ~np.isnan(vals)
+    if not mask.any():
         return None
-    d["Month"] = d["Date"].dt.month
-    monthly = d.groupby("Month")["Value"].mean()
-    overall = d["Value"].mean()
-    if overall is None or overall == 0 or np.isnan(overall):
+    months = pd.DatetimeIndex(dt)[mask].month
+    vals = vals[mask]
+    overall = vals.mean()
+    if overall == 0 or np.isnan(overall):
         return None
+    monthly = pd.Series(vals, index=months).groupby(level=0).mean()
     profile = monthly / overall
     return profile.reindex(range(1, 13))
 
@@ -1436,11 +1457,22 @@ def build_anomaly_summary(filtered_df: pd.DataFrame,
     if boundary is None:
         return pd.DataFrame()
 
+    # ---- Performance pre-filter -------------------------------------------
+    # analyze_key_anomalies needs >= 6 non-zero Sales-History months (up to the
+    # boundary) to say anything. Compute that in one vectorised pass and skip
+    # the expensive per-Key trend/seasonality/IQR work for Keys that can't
+    # qualify — this is the dominant cost in the scan.
+    sh = filtered_df[(filtered_df["Data"] == SALES_HISTORY_LABEL)
+                     & (filtered_df["Date"] <= boundary)]
+    sh = sh[sh["Value"].notna() & (sh["Value"] != 0)]
+    eligible = (sh.groupby("Key")["Date"].nunique())
+    eligible_keys = set(eligible[eligible >= 6].index)
+    if not eligible_keys:
+        return pd.DataFrame()
+    work = filtered_df[filtered_df["Key"].isin(eligible_keys)]
+
     rows = []
-    # Identify a representative descriptor per Key for the table.
-    descriptor_cols = ["Ship To Sub Region", "Business Line", "Material",
-                       "Arkieva ABC", "Arkieva Pattern"]
-    for key, grp in filtered_df.groupby("Key"):
+    for key, grp in work.groupby("Key"):
         profile = analyze_key_anomalies(grp, boundary)
         if profile is None:
             continue
@@ -1496,6 +1528,7 @@ def active_year_from_history(filtered_df: pd.DataFrame) -> Optional[int]:
     return int(pd.Timestamp(boundary).year)
 
 
+@st.cache_data(show_spinner=False)
 def compute_stat_adoption(
     filtered_df: pd.DataFrame,
     group_col: Optional[str] = None,
@@ -1565,6 +1598,7 @@ def compute_stat_adoption(
     return agg[base_cols]
 
 
+@st.cache_data(show_spinner=False)
 def stat_adoption_material_table(
     filtered_df: pd.DataFrame,
     active_year: Optional[int] = None,
@@ -1624,6 +1658,217 @@ def stat_adoption_material_table(
     )
     out = out.sort_values("Total forecast (kg)", ascending=False).reset_index(drop=True)
     return out
+
+
+# ---------------------------------------------------------------------------
+# STF Variation & Exceptions engine
+# ---------------------------------------------------------------------------
+# Variance driver buckets for the waterfall decomposition.
+STF_DRIVER_NEW = "New item / distribution added"
+STF_DRIVER_DISCO = "Disco / distribution loss"
+STF_DRIVER_TREND_UP = "Trend up"
+STF_DRIVER_TREND_DOWN = "Trend down"
+STF_DRIVER_ORDER = [STF_DRIVER_NEW, STF_DRIVER_TREND_UP,
+                    STF_DRIVER_TREND_DOWN, STF_DRIVER_DISCO]
+
+
+def stf_m4_month(filtered_df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """Determine **Month 4 (M4)** — the start of the variation horizon.
+
+    The "current month" is the last active month in Sales History (the
+    history/forecast boundary). M4 is the 4th month after the current month
+    (current + 4), e.g. current = June → M1 July, M2 Aug, M3 Sep, M4 Oct.
+    """
+    boundary = history_forecast_boundary(filtered_df)
+    if boundary is None:
+        return None
+    return (pd.Timestamp(boundary) + pd.DateOffset(months=4)).normalize().replace(day=1)
+
+
+def stf_horizon_months(
+    all_months: List[pd.Timestamp],
+    m4: pd.Timestamp,
+    horizon: str = "fiscal_year",
+    window: Optional[int] = None,
+) -> List[pd.Timestamp]:
+    """Return the list of months in the requested horizon, starting at M4.
+
+    * ``horizon='fiscal_year'`` → M4 through December of M4's year.
+    * ``horizon='next_12'``      → M4 plus the following 11 months (12 total).
+
+    If ``window`` is given it caps the number of months returned (the sliding
+    window from M4), so the user can shorten either horizon.
+    """
+    months_sorted = sorted(all_months)
+    if m4 is None:
+        return []
+    if horizon == "fiscal_year":
+        candidate = [m for m in months_sorted
+                     if m >= m4 and m.year == m4.year and m.month <= 12]
+    else:  # next_12
+        future = [m for m in months_sorted if m >= m4]
+        candidate = future[:12]
+    if window is not None:
+        candidate = candidate[:max(1, window)]
+    return candidate
+
+
+@st.cache_data(show_spinner=False)
+def compute_stf_variance(
+    filtered_df: pd.DataFrame,
+    horizon_months: Tuple[pd.Timestamp, ...],
+) -> pd.DataFrame:
+    """Per-Key STF variance over the given horizon months.
+
+    Variance = (Σ current committed − Σ lag-1 committed) / Σ lag-1 committed,
+    summed across the horizon months. Returns one row per Key with the
+    current/lag totals, signed STF Variance and Absolute STF Variance, plus
+    descriptive columns, sorted by Absolute STF Variance (high → low).
+    """
+    cols = ["Key", "Business Line", "Material", "Ship To Sub Region",
+            "Arkieva ABC", "Arkieva Pattern", "Arkieva Active Status",
+            "CurrentSTF", "Lag1STF", "STF Variance", "Absolute STF Variance"]
+    if filtered_df.empty or not horizon_months:
+        return pd.DataFrame(columns=cols)
+
+    hz = list(horizon_months)
+    sub = filtered_df[
+        filtered_df["Data"].isin([STF_CURRENT_LABEL, STF_LAG1_LABEL])
+        & filtered_df["Date"].isin(hz)
+    ].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=cols)
+
+    # Sum each series over the horizon, per Key.
+    grp = (sub.groupby(["Key", "Data"], as_index=False)["Value"].sum()
+           .pivot(index="Key", columns="Data", values="Value"))
+    grp = grp.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
+    grp.columns = ["CurrentSTF", "Lag1STF"]
+    grp = grp.reset_index()
+
+    grp["STF Variance"] = np.where(
+        grp["Lag1STF"] != 0,
+        (grp["CurrentSTF"] - grp["Lag1STF"]) / grp["Lag1STF"],
+        np.nan,
+    )
+    grp["Absolute STF Variance"] = grp["STF Variance"].abs()
+
+    # Attach descriptors (first row per Key).
+    desc_cols = ["Business Line", "Material", "Ship To Sub Region",
+                 "Arkieva ABC", "Arkieva Pattern", "Arkieva Active Status"]
+    desc_cols = [c for c in desc_cols if c in filtered_df.columns]
+    desc = filtered_df.drop_duplicates(subset=["Key"]).set_index("Key")[desc_cols]
+    out = grp.merge(desc, left_on="Key", right_index=True, how="left")
+
+    out = out.dropna(subset=["STF Variance"])
+    out = out.sort_values("Absolute STF Variance", ascending=False).reset_index(drop=True)
+    return out[[c for c in cols if c in out.columns]]
+
+
+@st.cache_data(show_spinner=False)
+def compute_stf_month_variance(
+    filtered_df: pd.DataFrame,
+    keys: Tuple[str, ...],
+    horizon_months: Tuple[pd.Timestamp, ...],
+) -> pd.DataFrame:
+    """Month-level STF variance for a set of Keys, for the heat-style table
+    that highlights which months drive the variation.
+
+    Returns long rows: [Key, Date, CurrentSTF, Lag1STF, STF Variance,
+    Absolute STF Variance].
+    """
+    cols = ["Key", "Date", "CurrentSTF", "Lag1STF",
+            "STF Variance", "Absolute STF Variance"]
+    if filtered_df.empty or not horizon_months or not keys:
+        return pd.DataFrame(columns=cols)
+
+    hz = list(horizon_months)
+    keyset = set(keys)
+    sub = filtered_df[
+        filtered_df["Key"].isin(keyset)
+        & filtered_df["Data"].isin([STF_CURRENT_LABEL, STF_LAG1_LABEL])
+        & filtered_df["Date"].isin(hz)
+    ].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=cols)
+
+    piv = (sub.groupby(["Key", "Date", "Data"], as_index=False)["Value"].sum()
+           .pivot_table(index=["Key", "Date"], columns="Data",
+                        values="Value", fill_value=0.0))
+    piv = piv.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
+    piv.columns = ["CurrentSTF", "Lag1STF"]
+    piv = piv.reset_index()
+    piv["STF Variance"] = np.where(
+        piv["Lag1STF"] != 0,
+        (piv["CurrentSTF"] - piv["Lag1STF"]) / piv["Lag1STF"],
+        np.nan,
+    )
+    piv["Absolute STF Variance"] = piv["STF Variance"].abs()
+    return piv[cols]
+
+
+def classify_stf_driver(current: float, lag1: float) -> str:
+    """Classify a single (current, lag1) month delta into a driver bucket."""
+    if lag1 == 0 and current > 0:
+        return STF_DRIVER_NEW
+    if lag1 > 0 and current == 0:
+        return STF_DRIVER_DISCO
+    if current > lag1:
+        return STF_DRIVER_TREND_UP
+    if current < lag1:
+        return STF_DRIVER_TREND_DOWN
+    return STF_DRIVER_TREND_UP  # no change → neutral, bucket as trend
+
+
+@st.cache_data(show_spinner=False)
+def compute_stf_drivers(
+    filtered_df: pd.DataFrame,
+    horizon_months: Tuple[pd.Timestamp, ...],
+    keys: Optional[Tuple[str, ...]] = None,
+) -> pd.DataFrame:
+    """Decompose the net STF change (current − lag1) into driver buckets for
+    the waterfall chart. Each month×Key delta is assigned to exactly one
+    bucket; the bucket sums reconcile to the net change.
+
+    Returns [Driver, Delta] in waterfall order. When ``keys`` is given the
+    decomposition is restricted to those Keys (e.g. a single Key drill-down);
+    otherwise it rolls up across all Keys in ``filtered_df``.
+    """
+    cols = ["Driver", "Delta"]
+    if filtered_df.empty or not horizon_months:
+        return pd.DataFrame(columns=cols)
+
+    hz = list(horizon_months)
+    sub = filtered_df[
+        filtered_df["Data"].isin([STF_CURRENT_LABEL, STF_LAG1_LABEL])
+        & filtered_df["Date"].isin(hz)
+    ]
+    if keys:
+        sub = sub[sub["Key"].isin(set(keys))]
+    if sub.empty:
+        return pd.DataFrame(columns=cols)
+
+    piv = (sub.groupby(["Key", "Date", "Data"], as_index=False)["Value"].sum()
+           .pivot_table(index=["Key", "Date"], columns="Data",
+                        values="Value", fill_value=0.0))
+    piv = piv.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
+    cur = piv[STF_CURRENT_LABEL].to_numpy()
+    lag = piv[STF_LAG1_LABEL].to_numpy()
+    delta = cur - lag
+
+    buckets = {STF_DRIVER_NEW: 0.0, STF_DRIVER_DISCO: 0.0,
+               STF_DRIVER_TREND_UP: 0.0, STF_DRIVER_TREND_DOWN: 0.0}
+    new_mask = (lag == 0) & (cur > 0)
+    disco_mask = (lag > 0) & (cur == 0)
+    up_mask = (~new_mask) & (~disco_mask) & (cur > lag)
+    dn_mask = (~new_mask) & (~disco_mask) & (cur < lag)
+    buckets[STF_DRIVER_NEW] = float(delta[new_mask].sum())
+    buckets[STF_DRIVER_DISCO] = float(delta[disco_mask].sum())
+    buckets[STF_DRIVER_TREND_UP] = float(delta[up_mask].sum())
+    buckets[STF_DRIVER_TREND_DOWN] = float(delta[dn_mask].sum())
+
+    rows = [{"Driver": d, "Delta": buckets[d]} for d in STF_DRIVER_ORDER]
+    return pd.DataFrame(rows, columns=cols)
 
 
 # ---------------------------------------------------------------------------
@@ -1862,6 +2107,238 @@ def _render_anomaly_drilldown(key: str, filtered_df: pd.DataFrame) -> None:
             )
             st.markdown(f"**Root cause:** {info['root_cause']}")
             st.markdown(f"**Next steps:** {info['next_steps']}")
+
+
+# ---------------------------------------------------------------------------
+# UI – Tab: STF Variation & Exceptions
+# ---------------------------------------------------------------------------
+def render_stf_variation_tab(long_df: pd.DataFrame,
+                             all_months: List[pd.Timestamp]) -> None:
+    st.subheader("📊 STF Variation & Exceptions")
+    st.caption(
+        "Compares the current **Statistical Forecast Committed** against "
+        "**Lag 1**. Variance = (Current − Lag 1) / Lag 1, per Key, over a "
+        "horizon that starts at **Month 4 (M4)** — the 4th month after the "
+        "last active Sales-History month."
+    )
+
+    # ---- Filters (same as Forecast vs Actuals) -----------------------------
+    with st.container(border=True):
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
+                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        selections = render_filter_strip(
+            long_df, FILTER_COLUMNS, key_prefix="stf",
+            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
+
+    filtered = apply_filters(long_df, selections)
+    if filtered.empty:
+        st.warning("No data matches the current filter combination.")
+        return
+
+    # Need both current STF and Lag 1 to compute variance.
+    if STF_LAG1_LABEL not in long_df["Data"].unique():
+        st.info("This file has no **Statistical Forecast Committed Lag 1 (kg)** "
+                "line, so STF variation cannot be computed. Please upload the "
+                "raw Arkieva export that includes the Lag 1 series.")
+        return
+
+    m4 = stf_m4_month(filtered)
+    if m4 is None:
+        st.info("Couldn't determine Month 4 (no Sales History for the current "
+                "filter selection).")
+        return
+
+    # ---- Horizon + sliding window controls ---------------------------------
+    c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
+    with c1:
+        horizon_choice = st.radio(
+            "Horizon", ["M4 → fiscal year-end", "M4 → next 12 months"],
+            key="stf::horizon",
+            help="Fiscal year is Jan–Dec. Horizon 1 runs from M4 to December "
+                 "of M4's year; Horizon 2 is M4 plus the next 11 months.",
+        )
+    horizon = "fiscal_year" if horizon_choice.startswith("M4 → fiscal") else "next_12"
+    full_horizon = stf_horizon_months(all_months, m4, horizon=horizon)
+    max_window = len(full_horizon)
+
+    with c2:
+        if max_window >= 2:
+            window = st.slider(
+                "Months from M4 (sliding window)",
+                min_value=1, max_value=max_window, value=max_window, step=1,
+                key="stf::window",
+                help="Shorten the horizon by sliding in from the far end. "
+                     "M4 is always the start.",
+            )
+        else:
+            window = max_window
+            st.caption("Horizon has a single month.")
+    with c3:
+        threshold_pct = st.slider(
+            "Absolute STF variation threshold", min_value=1, max_value=100,
+            value=5, step=1, format="%d%%", key="stf::threshold",
+            help="Keys with Absolute STF Variance above this are flagged as "
+                 "exceptions. Default 5%.",
+        )
+    threshold = threshold_pct / 100.0
+
+    horizon_months = stf_horizon_months(all_months, m4, horizon=horizon, window=window)
+    if not horizon_months:
+        st.info("No forecast months fall in the selected horizon.")
+        return
+
+    st.caption(
+        f"**M4 = {m4.strftime('%b %Y')}** · horizon "
+        f"**{horizon_months[0].strftime('%b %Y')} – "
+        f"{horizon_months[-1].strftime('%b %Y')}** "
+        f"({len(horizon_months)} month(s)) · threshold **{threshold_pct}%**"
+    )
+
+    # ---- Per-Key variance ---------------------------------------------------
+    var_df = compute_stf_variance(filtered, tuple(horizon_months))
+    if var_df.empty:
+        st.info("No Keys have a non-zero Lag 1 forecast in this horizon, so "
+                "variance can't be computed.")
+        return
+
+    n_exceptions = int((var_df["Absolute STF Variance"] > threshold).sum())
+    net_cur = var_df["CurrentSTF"].sum()
+    net_lag = var_df["Lag1STF"].sum()
+    rollup_var = ((net_cur - net_lag) / net_lag) if net_lag else np.nan
+
+    m1, m2, m3, m4c = st.columns(4)
+    m1.metric("Keys analysed", f"{len(var_df):,}")
+    m2.metric(f"Exceptions (> {threshold_pct}%)", f"{n_exceptions:,}")
+    m3.metric("Roll-up variance",
+              "–" if pd.isna(rollup_var) else f"{rollup_var*100:+.1f}%")
+    m4c.metric("Net STF change (kg)", f"{net_cur - net_lag:,.0f}")
+
+    # ---- Top 25 exception Keys ---------------------------------------------
+    st.markdown("### 🎯 Top exception Keys by Absolute STF Variance")
+    exceptions = var_df[var_df["Absolute STF Variance"] > threshold].head(25)
+    if exceptions.empty:
+        st.success(f"No Keys exceed the {threshold_pct}% threshold in this "
+                   "horizon. 🎉")
+    else:
+        st.caption(f"Showing top **{len(exceptions)}** of "
+                   f"**{n_exceptions}** Keys above the threshold.")
+        show = exceptions.copy()
+        show["STF Variance"] = show["STF Variance"] * 100
+        show["Absolute STF Variance"] = show["Absolute STF Variance"] * 100
+        disp_cols = ["Key", "Business Line", "Ship To Sub Region",
+                     "Arkieva Active Status", "CurrentSTF", "Lag1STF",
+                     "STF Variance", "Absolute STF Variance"]
+        disp_cols = [c for c in disp_cols if c in show.columns]
+        st.dataframe(
+            show[disp_cols].style.format({
+                "CurrentSTF": "{:,.0f}", "Lag1STF": "{:,.0f}",
+                "STF Variance": "{:+.1f}%", "Absolute STF Variance": "{:.1f}%",
+            }).background_gradient(subset=["Absolute STF Variance"],
+                                   cmap="Reds"),
+            use_container_width=True, hide_index=True, height=380,
+        )
+        csv = exceptions.to_csv(index=False)
+        st.download_button("⬇️ Download exception Keys (CSV)", data=csv,
+                           file_name="stf_exception_keys.csv", mime="text/csv",
+                           key="stf::dl_keys")
+
+        # ---- Bar of top exceptions ----------------------------------------
+        top_n = exceptions.head(15)
+        fig_bar = go.Figure(go.Bar(
+            x=(top_n["STF Variance"] * 100).tolist(),
+            y=top_n["Key"].tolist(), orientation="h",
+            marker=dict(
+                color=(top_n["STF Variance"] * 100).tolist(),
+                colorscale="RdBu", cmid=0,
+            ),
+            hovertemplate="%{y}<br>Variance: %{x:+.1f}%<extra></extra>",
+        ))
+        dark_layout(
+            fig_bar, title="Top exception Keys — STF Variance",
+            xaxis_title="STF Variance %", yaxis_title="",
+            height=440, margin=dict(t=50, l=10, r=20, b=50),
+        )
+        fig_bar.update_xaxes(ticksuffix="%")
+        fig_bar.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig_bar, use_container_width=True,
+                        config={"displaylogo": False})
+
+        # ---- Month highlight heat table for the exception Keys ------------
+        st.markdown("### 🗓️ Which months drive the variation?")
+        st.caption("Month-level STF Variance for the top exception Keys. "
+                   "Red = larger swing; cells above the threshold are the "
+                   "months to investigate.")
+        ex_keys = tuple(exceptions["Key"].tolist())
+        mv = compute_stf_month_variance(filtered, ex_keys, tuple(horizon_months))
+        if not mv.empty:
+            heat = mv.pivot_table(index="Key", columns="Date",
+                                  values="STF Variance", aggfunc="first")
+            heat = heat.reindex(index=list(ex_keys))
+            heat.columns = [pd.Timestamp(c).strftime("%b %Y") for c in heat.columns]
+            z = (heat.values * 100)
+            fig_hm = go.Figure(go.Heatmap(
+                z=z, x=list(heat.columns), y=list(heat.index),
+                colorscale="RdBu", zmid=0,
+                hovertemplate="%{y}<br>%{x}<br>Variance: %{z:.1f}%<extra></extra>",
+                colorbar=dict(title="%"),
+            ))
+            dark_layout(
+                fig_hm, title="", xaxis_title="Month", yaxis_title="Key",
+                height=max(320, 26 * len(ex_keys) + 120),
+                margin=dict(t=20, l=200, r=30, b=60),
+            )
+            fig_hm.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig_hm, use_container_width=True,
+                            config={"displaylogo": False})
+
+    # ---- Waterfall: variation drivers --------------------------------------
+    st.markdown("### 💧 STF variation drivers (waterfall)")
+    st.caption(
+        "Decomposes the net STF change (Current − Lag 1) into drivers. "
+        "Rolls up across the current filter selection; pick a single Key to "
+        "drill down."
+    )
+    drill_options = ["(All Keys — roll-up)"] + var_df["Key"].tolist()
+    drill_key = st.selectbox("Driver scope", drill_options, index=0,
+                             key="stf::driver_key")
+    keys_arg = None if drill_key.startswith("(All") else (drill_key,)
+    drivers = compute_stf_drivers(filtered, tuple(horizon_months), keys=keys_arg)
+
+    if drivers.empty or drivers["Delta"].abs().sum() == 0:
+        st.info("No driver decomposition available for this selection.")
+    else:
+        lag_base = net_lag if keys_arg is None else \
+            var_df.loc[var_df["Key"] == drill_key, "Lag1STF"].sum()
+        measures = ["absolute"] + ["relative"] * len(drivers) + ["total"]
+        x_labels = ["Lag 1 base"] + drivers["Driver"].tolist() + ["Current"]
+        y_vals = [lag_base] + drivers["Delta"].tolist() + [None]
+        fig_wf = go.Figure(go.Waterfall(
+            orientation="v", measure=measures, x=x_labels, y=y_vals,
+            connector=dict(line=dict(color=DARK_MUTED)),
+            increasing=dict(marker=dict(color="#51cf66")),
+            decreasing=dict(marker=dict(color="#ff6b6b")),
+            totals=dict(marker=dict(color=ACCENT)),
+            hovertemplate="%{x}<br>%{y:,.0f} kg<extra></extra>",
+        ))
+        dark_layout(
+            fig_wf,
+            title=f"STF change decomposition — {'roll-up' if keys_arg is None else drill_key}",
+            xaxis_title="", yaxis_title="Forecast volume (kg)",
+            height=440, margin=dict(t=60, l=60, r=30, b=110),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_wf, use_container_width=True,
+                        config={"displaylogo": False})
+
+        dr_show = drivers.copy()
+        total_abs = dr_show["Delta"].abs().sum()
+        dr_show["% of gross change"] = np.where(
+            total_abs != 0, dr_show["Delta"].abs() / total_abs * 100, 0.0)
+        st.dataframe(
+            dr_show.style.format({"Delta": "{:,.0f}",
+                                  "% of gross change": "{:.1f}%"}),
+            use_container_width=True, hide_index=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2733,19 +3210,23 @@ def main() -> None:
             "To Sub Region, assigns each a reason code (trend reversal, trend "
             "mismatch, seasonality loss, IQR outliers), and lets you drill "
             "down to the root cause and recommended next steps.\n"
-            "2. An interactive replica of the *Forecast vs Actuals* pivot "
+            "2. An **STF Variation & Exceptions** view comparing the current "
+            "Statistical Forecast Committed against Lag 1 over M4-based "
+            "horizons, flagging top exception Keys, the months driving them, "
+            "and a waterfall of variation drivers.\n"
+            "3. An interactive replica of the *Forecast vs Actuals* pivot "
             "chart with all original slicer filters on top — clearly "
             "splitting **History** vs **Forecast** series, with optional "
             "**trend lines** and an automatic trend interpretation.\n"
-            "3. A **Statistical Forecast Adoption %** view showing the share "
-            "of volume on statistical forecast by fiscal year, Business Line "
-            "and Ship To Sub Region, with the underlying materials table.\n"
             "4. An **outlier detection & correction** view (choose **IQR** or "
             "**Sigma**) for the **Sales History** of every Key, producing a "
             "cleansed history alongside the original.\n"
             "5. A **year-over-year seasonality** view comparing the forecast's "
             "seasonal shape against the last 3 historical years, with an "
-            "automatic interpretation of forecast quality."
+            "automatic interpretation of forecast quality.\n"
+            "6. A **Statistical Forecast Adoption %** view showing the share "
+            "of volume on statistical forecast by fiscal year, Business Line "
+            "and Ship To Sub Region, with the underlying materials table."
         )
         st.stop()
 
@@ -2756,7 +3237,7 @@ def main() -> None:
 
     file_bytes = uploaded.getvalue()
     try:
-        long_df, _ = load_excel(file_bytes, uploaded.name)
+        long_df, all_months = load_excel(file_bytes, uploaded.name)
     except ValueError as exc:
         st.error(f"❌ {exc}")
         st.stop()
@@ -2768,8 +3249,9 @@ def main() -> None:
         st.error("The uploaded file contains no usable rows.")
         st.stop()
 
-    tab0, tab1, tab2, tab3, tab4 = st.tabs([
+    tab0, tab_stf, tab1, tab2, tab3, tab4 = st.tabs([
         "🧭 Anomaly Summary",
+        "📊 STF Variation & Exceptions",
         "📈 Forecast vs Actuals",
         "🚨 Outlier Detection & Correction",
         "📅 Seasonality (YoY)",
@@ -2777,6 +3259,8 @@ def main() -> None:
     ])
     with tab0:
         render_anomaly_tab(long_df)
+    with tab_stf:
+        render_stf_variation_tab(long_df, all_months)
     with tab1:
         render_dashboard_tab(long_df, uploaded.name)
     with tab2:
