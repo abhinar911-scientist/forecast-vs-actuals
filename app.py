@@ -1663,13 +1663,13 @@ def stat_adoption_material_table(
 # ---------------------------------------------------------------------------
 # STF Variation & Exceptions engine
 # ---------------------------------------------------------------------------
-# Variance driver buckets for the waterfall decomposition.
-STF_DRIVER_NEW = "New item / distribution added"
-STF_DRIVER_DISCO = "Disco / distribution loss"
-STF_DRIVER_TREND_UP = "Trend up"
-STF_DRIVER_TREND_DOWN = "Trend down"
-STF_DRIVER_ORDER = [STF_DRIVER_NEW, STF_DRIVER_TREND_UP,
-                    STF_DRIVER_TREND_DOWN, STF_DRIVER_DISCO]
+# The waterfall decomposes the net STF change by each row's **Arkieva Active
+# Status** — the Demand Planner's own classification of where forecast is
+# coming from (new items, sparse, obsolete, …). Every data row carries exactly
+# one status, so the per-status deltas reconcile exactly to the net change.
+# Display order for the buckets (statuses absent from the data are skipped):
+STF_STATUS_ORDER = ["Active", "Active New", "New", "New Combination",
+                    "Sparse", "Obsolete", "Inactive", "-"]
 
 
 def stf_m4_month(filtered_df: pd.DataFrame) -> Optional[pd.Timestamp]:
@@ -1807,32 +1807,26 @@ def compute_stf_month_variance(
     return piv[cols]
 
 
-def classify_stf_driver(current: float, lag1: float) -> str:
-    """Classify a single (current, lag1) month delta into a driver bucket."""
-    if lag1 == 0 and current > 0:
-        return STF_DRIVER_NEW
-    if lag1 > 0 and current == 0:
-        return STF_DRIVER_DISCO
-    if current > lag1:
-        return STF_DRIVER_TREND_UP
-    if current < lag1:
-        return STF_DRIVER_TREND_DOWN
-    return STF_DRIVER_TREND_UP  # no change → neutral, bucket as trend
-
-
 @st.cache_data(show_spinner=False)
 def compute_stf_drivers(
     filtered_df: pd.DataFrame,
     horizon_months: Tuple[pd.Timestamp, ...],
     keys: Optional[Tuple[str, ...]] = None,
 ) -> pd.DataFrame:
-    """Decompose the net STF change (current − lag1) into driver buckets for
-    the waterfall chart. Each month×Key delta is assigned to exactly one
-    bucket; the bucket sums reconcile to the net change.
+    """Decompose the net STF change (current − lag1) over the horizon into
+    **Arkieva Active Status** buckets for the waterfall chart.
 
-    Returns [Driver, Delta] in waterfall order. When ``keys`` is given the
-    decomposition is restricted to those Keys (e.g. a single Key drill-down);
-    otherwise it rolls up across all Keys in ``filtered_df``.
+    Every data row carries exactly one Arkieva Active Status (Active,
+    Active New, New, New Combination, Sparse, Obsolete, Inactive, …), so
+    Delta(status) = Σ current(status) − Σ lag1(status) and the bucket sums
+    reconcile exactly to the net change. This lets Demand Planners read the
+    waterfall in Arkieva's own vocabulary — e.g. forecast added by *Active
+    New*/*New* items vs forecast lost from *Obsolete*/*Inactive* ones.
+
+    Returns [Driver, Delta] where Driver is the status, ordered per
+    STF_STATUS_ORDER (statuses with no data in the horizon are skipped).
+    When ``keys`` is given the decomposition is restricted to those Keys
+    (single-Key drill-down); otherwise it rolls up across ``filtered_df``.
     """
     cols = ["Driver", "Delta"]
     if filtered_df.empty or not horizon_months:
@@ -1848,26 +1842,20 @@ def compute_stf_drivers(
     if sub.empty:
         return pd.DataFrame(columns=cols)
 
-    piv = (sub.groupby(["Key", "Date", "Data"], as_index=False)["Value"].sum()
-           .pivot_table(index=["Key", "Date"], columns="Data",
-                        values="Value", fill_value=0.0))
-    piv = piv.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
-    cur = piv[STF_CURRENT_LABEL].to_numpy()
-    lag = piv[STF_LAG1_LABEL].to_numpy()
-    delta = cur - lag
+    # Σ per (status, series), then Delta = current − lag1 per status.
+    grp = (sub.groupby([ACTIVE_STATUS_COL, "Data"], as_index=False)["Value"]
+           .sum()
+           .pivot(index=ACTIVE_STATUS_COL, columns="Data", values="Value"))
+    grp = grp.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
+    grp["Delta"] = grp[STF_CURRENT_LABEL] - grp[STF_LAG1_LABEL]
 
-    buckets = {STF_DRIVER_NEW: 0.0, STF_DRIVER_DISCO: 0.0,
-               STF_DRIVER_TREND_UP: 0.0, STF_DRIVER_TREND_DOWN: 0.0}
-    new_mask = (lag == 0) & (cur > 0)
-    disco_mask = (lag > 0) & (cur == 0)
-    up_mask = (~new_mask) & (~disco_mask) & (cur > lag)
-    dn_mask = (~new_mask) & (~disco_mask) & (cur < lag)
-    buckets[STF_DRIVER_NEW] = float(delta[new_mask].sum())
-    buckets[STF_DRIVER_DISCO] = float(delta[disco_mask].sum())
-    buckets[STF_DRIVER_TREND_UP] = float(delta[up_mask].sum())
-    buckets[STF_DRIVER_TREND_DOWN] = float(delta[dn_mask].sum())
-
-    rows = [{"Driver": d, "Delta": buckets[d]} for d in STF_DRIVER_ORDER]
+    # Order buckets per STF_STATUS_ORDER; append any unexpected statuses at
+    # the end so the decomposition always reconciles.
+    present = list(grp.index)
+    ordered = [s for s in STF_STATUS_ORDER if s in present] + \
+              [s for s in present if s not in STF_STATUS_ORDER]
+    rows = [{"Driver": s, "Delta": float(grp.loc[s, "Delta"])}
+            for s in ordered]
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -1895,8 +1883,9 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
                     "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        anom_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
         selections = render_filter_strip(
-            long_df, FILTER_COLUMNS, key_prefix="anom",
+            long_df, anom_filter_cols, key_prefix="anom",
             default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     filtered = apply_filters(long_df, selections)
@@ -2122,13 +2111,13 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
         "last active Sales-History month."
     )
 
-    # ---- Filters (same as Forecast vs Actuals) -----------------------------
+    # ---- Filters (same as Forecast vs Actuals, minus Data; NO status default)
     with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
-                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows "
+                    "the others). Leave a filter empty to include everything.")
+        stf_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
         selections = render_filter_strip(
-            long_df, FILTER_COLUMNS, key_prefix="stf",
-            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
+            long_df, stf_filter_cols, key_prefix="stf")
 
     filtered = apply_filters(long_df, selections)
     if filtered.empty:
@@ -2213,6 +2202,61 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
               "–" if pd.isna(rollup_var) else f"{rollup_var*100:+.1f}%")
     m4c.metric("Net STF change (kg)", f"{net_cur - net_lag:,.0f}")
 
+    # ---- 36-month history vs forecast-vintage comparison -------------------
+    st.markdown("### 📉 History & forecast vintages — last 36 months")
+    st.caption(
+        "Aggregated over the current filter selection: **Sales History**, "
+        "**History For Forecast**, the **current Statistical Forecast "
+        "Committed** and **Lag 1**. Where the two committed lines separate "
+        "is where this cycle's forecast changed from the prior cycle."
+    )
+    last_month = max(all_months)
+    win_start = (pd.Timestamp(last_month) - pd.DateOffset(months=35)).replace(day=1)
+    cmp_series = [
+        (SALES_HISTORY_LABEL, "Sales History",
+         SERIES_STYLE[SALES_HISTORY_LABEL]["color"]),
+        (HISTORY_FOR_FORECAST_LABEL, "History For Forecast",
+         SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"]),
+        (STF_CURRENT_LABEL, "Statistical Forecast Committed (current)",
+         SERIES_STYLE[STAT_FORECAST_LABEL]["color"]),
+        (STF_LAG1_LABEL, "Statistical Forecast Committed Lag 1", "#c084fc"),
+    ]
+    cmp_df = filtered[
+        filtered["Data"].isin([s[0] for s in cmp_series])
+        & (filtered["Date"] >= win_start)
+    ]
+    cmp_agg = (cmp_df.dropna(subset=["Value"])
+               .groupby(["Date", "Data"], as_index=False)["Value"].sum())
+    if cmp_agg.empty:
+        st.info("No data in the last-36-month window for this selection.")
+    else:
+        boundary = history_forecast_boundary(filtered)
+        fig_cmp = go.Figure()
+        if boundary is not None and boundary >= win_start:
+            fig_cmp.add_vline(x=boundary,
+                              line=dict(color=DARK_MUTED, width=1, dash="dot"))
+        for label, name, color in cmp_series:
+            s = cmp_agg[cmp_agg["Data"] == label]
+            if s.empty:
+                continue
+            fig_cmp.add_trace(go.Scatter(
+                x=s["Date"], y=s["Value"], name=name, mode="lines+markers",
+                line=dict(color=color, width=2.2, shape="spline"),
+                marker=dict(size=4),
+                hovertemplate=f"{name}<br>%{{x|%b %Y}}<br>%{{y:,.0f}} kg"
+                              "<extra></extra>",
+            ))
+        dark_layout(
+            fig_cmp, title="Sales History vs forecast vintages",
+            xaxis_title="Months", yaxis_title="Demand volume in kgs",
+            height=430,
+            legend=dict(orientation="h", y=-0.28, x=0.5, xanchor="center",
+                        bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+            margin=dict(t=60, l=60, r=30, b=110),
+        )
+        st.plotly_chart(fig_cmp, use_container_width=True,
+                        config={"displaylogo": False})
+
     # ---- Top 25 exception Keys ---------------------------------------------
     st.markdown("### 🎯 Top exception Keys by Absolute STF Variance")
     exceptions = var_df[var_df["Absolute STF Variance"] > threshold].head(25)
@@ -2284,17 +2328,22 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
         st.plotly_chart(fig_bar, use_container_width=True,
                         config={"displaylogo": False})
 
-        # ---- Month highlight heat table for the exception Keys ------------
+        # ---- Month highlight for the exception Keys ------------------------
         st.markdown("### 🗓️ Which months drive the variation?")
-        st.caption("Month-level STF Variance for the top exception Keys. "
-                   "Red = larger swing; cells above the threshold are the "
-                   "months to investigate.")
-        ex_keys = tuple(exceptions["Key"].tolist())
-        mv = compute_stf_month_variance(filtered, ex_keys, tuple(horizon_months))
+        st.caption("Month-level STF Variance. Red = larger swing; the "
+                   "strongest cells are the months to investigate.")
+        month_options = ["(Top 10 exception Keys)"] + exceptions["Key"].tolist()
+        month_scope = st.selectbox("Month-variation scope", month_options,
+                                   index=0, key="stf::month_key")
+        if month_scope.startswith("(Top 10"):
+            mv_keys = tuple(exceptions["Key"].head(10).tolist())
+        else:
+            mv_keys = (month_scope,)
+        mv = compute_stf_month_variance(filtered, mv_keys, tuple(horizon_months))
         if not mv.empty:
             heat = mv.pivot_table(index="Key", columns="Date",
                                   values="STF Variance", aggfunc="first")
-            heat = heat.reindex(index=list(ex_keys))
+            heat = heat.reindex(index=list(mv_keys))
             heat.columns = [pd.Timestamp(c).strftime("%b %Y") for c in heat.columns]
             z = (heat.values * 100)
             fig_hm = go.Figure(go.Heatmap(
@@ -2305,17 +2354,20 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             ))
             dark_layout(
                 fig_hm, title="", xaxis_title="Month", yaxis_title="Key",
-                height=max(320, 26 * len(ex_keys) + 120),
+                height=max(240, 26 * len(mv_keys) + 140),
                 margin=dict(t=20, l=200, r=30, b=60),
             )
             fig_hm.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_hm, use_container_width=True,
                             config={"displaylogo": False})
 
-    # ---- Waterfall: variation drivers --------------------------------------
+    # ---- Waterfall: variation drivers by Arkieva Active Status -------------
     st.markdown("### 💧 STF variation drivers (waterfall)")
     st.caption(
-        "Decomposes the net STF change (Current − Lag 1) into drivers. "
+        "Decomposes the net STF change (Current − Lag 1) into **Arkieva "
+        "Active Status** buckets — Active, Active New, New, Sparse, Obsolete, "
+        "Inactive, … — so you can see where the forecast changes are coming "
+        "from (e.g. volume added by new items vs lost from obsolete ones). "
         "Rolls up across the current filter selection; pick a single Key to "
         "drill down."
     )
@@ -2992,8 +3044,9 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
                     "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
+        adopt_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
         selections = render_filter_strip(
-            long_df, FILTER_COLUMNS, key_prefix="adopt",
+            long_df, adopt_filter_cols, key_prefix="adopt",
             default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     filtered = apply_filters(long_df, selections)

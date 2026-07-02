@@ -22,14 +22,24 @@ recently uploaded file — no manual preparation needed.
 - The app is gated behind a **login screen**: nothing (including the file
   uploader) renders until a valid username and password are entered.
 - Seven authorised users are configured. Usernames are case-insensitive;
-  passwords are case-sensitive. 
+  passwords are case-sensitive. Credentials are stored in the code as
+  **SHA-256 hashes only — never plaintext** — and verified with a
+  constant-time comparison (`hmac.compare_digest`).
 - After signing in, the header shows who is signed in and provides a
   **🚪 Log out** button, which clears all session state (filters, data
   cache, upload) and returns to the sign-in screen.
 - The raw password is purged from Streamlit session state immediately
   after a successful login.
 
-
+> **Security note for public repositories:** Streamlit Community Cloud's
+> free tier requires a public GitHub repo, which means the hashed
+> credential list in `app.py` is publicly visible. SHA-256 hashes cannot
+> be reversed directly, but short/patterned passwords are vulnerable to
+> guessing. For stronger protection, move the hash table into **Streamlit
+> secrets** (App → Settings → Secrets) and read it via `st.secrets`, or
+> upgrade to a private repo on a paid workspace. Share the actual
+> passwords with your users through a private channel — never commit
+> plaintext passwords or document them in this README.
 
 ### Dark theme
 - The entire UI uses a **dark theme** — background, filters, dropdown
@@ -47,9 +57,9 @@ recently uploaded file — no manual preparation needed.
 The **first tab** — a triage view for Demand Planners.
 
 - Uses the **same cascading filters** as the *Forecast vs Actuals*
-  tab (Business Line, Arkieva ABC, Ship To Sub Region, Material, Arkieva
-  Review Req, Arkieva Active Status, Arkieva Pattern, Data), with Arkieva
-  Active Status defaulting to Active + Sparse.
+  tab minus the *Data* filter (Business Line, Arkieva ABC, Ship To Sub
+  Region, Material, Arkieva Review Req, Arkieva Active Status, Arkieva
+  Pattern), with Arkieva Active Status defaulting to Active + Sparse.
 - Scans every Key and lists the **top N anomalies (default 20) per Ship
   To Sub Region**, ranked by a severity score, each tagged with a
   **reason code**:
@@ -102,18 +112,28 @@ committed forecast), to surface where the forecast has moved.
   - **M4 → next 12 months** — M4 plus the following 11 months (12 total).
 - A **sliding window** slider shortens either horizon from the far end
   (M4 always stays the start).
+- A **36-month "History & forecast vintages" chart** right after the
+  headline cards overlays **Sales History**, **History For Forecast**, the
+  **current Statistical Forecast Committed** and **Lag 1** (aggregated over
+  the filter selection, history/forecast boundary marked) — where the two
+  committed lines separate is where this cycle's forecast changed.
 - An **Absolute STF variation threshold** slider (default **5%**) flags
   exception Keys; the tab lists the **top 25** Keys above the threshold,
-  with a red-gradient table, a variance bar chart, and a **month-level
-  heatmap** that highlights *which months* drive each Key's variation.
+  with a red-gradient table and a variance bar chart.
+- A **month-level heatmap** highlights *which months* drive the variation,
+  with its own **scope selector** (top-10 exception Keys, or any single
+  exception Key) so the view stays compact.
 - A **waterfall chart** decomposes the net STF change (Current − Lag 1)
-  into driver buckets — **new item / distribution added**, **trend up**,
-  **trend down**, and **disco / distribution loss** — rolled up across the
-  current filter selection, with a drill-down to any single Key. The bucket
-  deltas reconcile exactly to the net change.
-- Uses the **same cascading filters** as *Forecast vs Actuals*, with
-  Arkieva Active Status defaulting to Active + Sparse. Every visual reacts
-  to the filters.
+  into **Arkieva Active Status** buckets — Active, Active New, New,
+  New Combination, Sparse, Obsolete, Inactive — so Demand Planners can see
+  where the forecast changes are coming from in Arkieva's own vocabulary
+  (e.g. volume added by new items vs lost from obsolete ones). Rolls up
+  across the filter selection, with a drill-down to any single Key; the
+  bucket deltas reconcile exactly to the net change.
+- Uses the same cascading filters as *Forecast vs Actuals* **minus the
+  Data filter** (the tab is intrinsically scoped to the two committed
+  lines), and applies **no Arkieva Active Status default** — all statuses
+  are included unless you filter them. Every visual reacts to the filters.
 
   If the uploaded file has no Lag 1 line, the tab explains that variance
   can't be computed and points to the raw Arkieva export that includes it.
@@ -197,9 +217,9 @@ The **last tab**. Shows how much demand volume is being driven by the
   computes adoption for that year and every **future** year. Past years
   (whose forecast is already historical) are excluded. The active year is
   shown at the top of the tab.
-- Uses the **same cascading filters** as the other tabs, with Arkieva
-  Active Status defaulting to **Active + Sparse**. Every chart reacts
-  instantly to filter changes.
+- Uses the **same cascading filters** as the other tabs minus the *Data*
+  filter, with Arkieva Active Status defaulting to **Active + Sparse**.
+  Every chart reacts instantly to filter changes.
 - Visuals: an adoption-by-fiscal-year bar+trend combo, grouped bar charts
   **by Business Line** and **by Ship To Sub Region**, and a Business
   Line × year **heatmap**.
