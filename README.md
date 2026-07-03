@@ -112,14 +112,18 @@ committed forecast), to surface where the forecast has moved.
   - **M4 → next 12 months** — M4 plus the following 11 months (12 total).
 - A **sliding window** slider shortens either horizon from the far end
   (M4 always stays the start).
-- A **36-month "History & forecast vintages" chart** right after the
-  headline cards overlays **Sales History**, **History For Forecast**, the
-  **current Statistical Forecast Committed** and **Lag 1** (aggregated over
-  the filter selection, history/forecast boundary marked) — where the two
-  committed lines separate is where this cycle's forecast changed.
+- A **"History & forecast vintages" chart** right after the headline
+  cards overlays the **last 36 months** of **Sales History** and **History
+  For Forecast** (ending at the last active history month) with the **next
+  24 months** of the **current Statistical Forecast Committed** and
+  **Lag 1** (aggregated over the filter selection, boundary marked) — where
+  the two committed lines separate is where this cycle's forecast changed.
 - An **Absolute STF variation threshold** slider (default **5%**) flags
-  exception Keys; the tab lists the **top 25** Keys above the threshold,
-  with a red-gradient table and a variance bar chart.
+  exception Keys. The tab shows the **top 25 Keys by Absolute STF
+  Variance** in a single table (no duplicate chart), with every
+  above-threshold variance cell highlighted in light red so violators
+  stand out at a glance; the table is sorted worst-first and exportable
+  to CSV.
 - A **month-level heatmap** highlights *which months* drive the variation,
   with its own **scope selector** (top-10 exception Keys, or any single
   exception Key) so the view stays compact.
@@ -218,8 +222,10 @@ The **last tab**. Shows how much demand volume is being driven by the
   (whose forecast is already historical) are excluded. The active year is
   shown at the top of the tab.
 - Uses the **same cascading filters** as the other tabs minus the *Data*
-  filter, with Arkieva Active Status defaulting to **Active + Sparse**.
-  Every chart reacts instantly to filter changes.
+  and *Arkieva Review Req* filters (the on-stat definition already applies
+  Review Req = No internally, so that filter is redundant here), with
+  Arkieva Active Status defaulting to **Active + Sparse**. Every chart
+  reacts instantly to filter changes.
 - Visuals: an adoption-by-fiscal-year bar+trend combo, grouped bar charts
   **by Business Line** and **by Ship To Sub Region**, and a Business
   Line × year **heatmap**.

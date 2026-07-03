@@ -2202,41 +2202,47 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
               "–" if pd.isna(rollup_var) else f"{rollup_var*100:+.1f}%")
     m4c.metric("Net STF change (kg)", f"{net_cur - net_lag:,.0f}")
 
-    # ---- 36-month history vs forecast-vintage comparison -------------------
-    st.markdown("### 📉 History & forecast vintages — last 36 months")
+    # ---- History (36m back) vs forecast vintages (24m forward) -------------
+    st.markdown("### 📉 History & forecast vintages")
     st.caption(
-        "Aggregated over the current filter selection: **Sales History**, "
-        "**History For Forecast**, the **current Statistical Forecast "
-        "Committed** and **Lag 1**. Where the two committed lines separate "
-        "is where this cycle's forecast changed from the prior cycle."
+        "Aggregated over the current filter selection: the **last 36 months** "
+        "of **Sales History** and **History For Forecast** (up to the last "
+        "active history month), and the **next 24 months** of the **current "
+        "Statistical Forecast Committed** and **Lag 1**. Where the two "
+        "committed lines separate is where this cycle's forecast changed "
+        "from the prior cycle."
     )
-    last_month = max(all_months)
-    win_start = (pd.Timestamp(last_month) - pd.DateOffset(months=35)).replace(day=1)
-    cmp_series = [
-        (SALES_HISTORY_LABEL, "Sales History",
-         SERIES_STYLE[SALES_HISTORY_LABEL]["color"]),
-        (HISTORY_FOR_FORECAST_LABEL, "History For Forecast",
-         SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"]),
-        (STF_CURRENT_LABEL, "Statistical Forecast Committed (current)",
-         SERIES_STYLE[STAT_FORECAST_LABEL]["color"]),
-        (STF_LAG1_LABEL, "Statistical Forecast Committed Lag 1", "#c084fc"),
-    ]
-    cmp_df = filtered[
-        filtered["Data"].isin([s[0] for s in cmp_series])
-        & (filtered["Date"] >= win_start)
-    ]
-    cmp_agg = (cmp_df.dropna(subset=["Value"])
-               .groupby(["Date", "Data"], as_index=False)["Value"].sum())
-    if cmp_agg.empty:
-        st.info("No data in the last-36-month window for this selection.")
+    boundary = history_forecast_boundary(filtered)
+    if boundary is None:
+        st.info("No Sales History for this selection, so the comparison "
+                "window can't be anchored.")
     else:
-        boundary = history_forecast_boundary(filtered)
+        hist_start = (pd.Timestamp(boundary) - pd.DateOffset(months=35)).replace(day=1)
+        fcst_start = (pd.Timestamp(boundary) + pd.DateOffset(months=1)).replace(day=1)
+        fcst_end = (pd.Timestamp(boundary) + pd.DateOffset(months=24)).replace(day=1)
+
+        # (label, display name, colour, window start, window end)
+        cmp_series = [
+            (SALES_HISTORY_LABEL, "Sales History (last 36m)",
+             SERIES_STYLE[SALES_HISTORY_LABEL]["color"], hist_start, boundary),
+            (HISTORY_FOR_FORECAST_LABEL, "History For Forecast (last 36m)",
+             SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"], hist_start, boundary),
+            (STF_CURRENT_LABEL, "Statistical Forecast Committed (next 24m)",
+             SERIES_STYLE[STAT_FORECAST_LABEL]["color"], fcst_start, fcst_end),
+            (STF_LAG1_LABEL, "Statistical Forecast Committed Lag 1 (next 24m)",
+             "#c084fc", fcst_start, fcst_end),
+        ]
+        cmp_agg = (filtered[filtered["Data"].isin([s[0] for s in cmp_series])]
+                   .dropna(subset=["Value"])
+                   .groupby(["Date", "Data"], as_index=False)["Value"].sum())
         fig_cmp = go.Figure()
-        if boundary is not None and boundary >= win_start:
-            fig_cmp.add_vline(x=boundary,
-                              line=dict(color=DARK_MUTED, width=1, dash="dot"))
-        for label, name, color in cmp_series:
-            s = cmp_agg[cmp_agg["Data"] == label]
+        fig_cmp.add_vline(x=boundary,
+                          line=dict(color=DARK_MUTED, width=1, dash="dot"))
+        n_traces = 0
+        for label, name, color, w_start, w_end in cmp_series:
+            s = cmp_agg[(cmp_agg["Data"] == label)
+                        & (cmp_agg["Date"] >= w_start)
+                        & (cmp_agg["Date"] <= w_end)]
             if s.empty:
                 continue
             fig_cmp.add_trace(go.Scatter(
@@ -2246,97 +2252,73 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
                 hovertemplate=f"{name}<br>%{{x|%b %Y}}<br>%{{y:,.0f}} kg"
                               "<extra></extra>",
             ))
-        dark_layout(
-            fig_cmp, title="Sales History vs forecast vintages",
-            xaxis_title="Months", yaxis_title="Demand volume in kgs",
-            height=430,
-            legend=dict(orientation="h", y=-0.28, x=0.5, xanchor="center",
-                        bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-            margin=dict(t=60, l=60, r=30, b=110),
-        )
-        st.plotly_chart(fig_cmp, use_container_width=True,
-                        config={"displaylogo": False})
+            n_traces += 1
+        if n_traces == 0:
+            st.info("No data in the comparison windows for this selection.")
+        else:
+            dark_layout(
+                fig_cmp, title="Sales History (36m) vs forecast vintages (24m)",
+                xaxis_title="Months", yaxis_title="Demand volume in kgs",
+                height=430,
+                legend=dict(orientation="h", y=-0.28, x=0.5, xanchor="center",
+                            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+                margin=dict(t=60, l=60, r=30, b=110),
+            )
+            st.plotly_chart(fig_cmp, use_container_width=True,
+                            config={"displaylogo": False})
 
     # ---- Top 25 exception Keys ---------------------------------------------
-    st.markdown("### 🎯 Top exception Keys by Absolute STF Variance")
-    exceptions = var_df[var_df["Absolute STF Variance"] > threshold].head(25)
-    if exceptions.empty:
+    st.markdown("### 🎯 Top 25 Keys by Absolute STF Variance")
+    top25 = var_df.head(25)
+    if n_exceptions == 0:
         st.success(f"No Keys exceed the {threshold_pct}% threshold in this "
-                   "horizon. 🎉")
+                   "horizon — the table below shows the largest movers. 🎉")
     else:
-        st.caption(f"Showing top **{len(exceptions)}** of "
-                   f"**{n_exceptions}** Keys above the threshold.")
-        show = exceptions.copy()
-        show["STF Variance"] = show["STF Variance"] * 100
-        show["Absolute STF Variance"] = show["Absolute STF Variance"] * 100
-        disp_cols = ["Key", "Business Line", "Ship To Sub Region",
-                     "Arkieva Active Status", "CurrentSTF", "Lag1STF",
-                     "STF Variance", "Absolute STF Variance"]
-        disp_cols = [c for c in disp_cols if c in show.columns]
-
-        # Red gradient on the Absolute STF Variance column, computed in pure
-        # Python (no matplotlib dependency, which isn't installed on
-        # Streamlit Cloud). Darker red = larger absolute variance.
-        _abs = show["Absolute STF Variance"]
-        _amin, _amax = float(_abs.min()), float(_abs.max())
-
-        def _red_shade(col: pd.Series) -> list:
-            styles = []
-            for v in col:
-                if _amax > _amin:
-                    frac = (float(v) - _amin) / (_amax - _amin)
-                else:
-                    frac = 0.0
-                # interpolate white → strong red; keep text readable
-                r = 255
-                g = int(round(255 * (1 - 0.72 * frac)))
-                b = int(round(255 * (1 - 0.72 * frac)))
-                text = "#ffffff" if frac > 0.6 else "#0e1117"
-                styles.append(f"background-color: rgb({r},{g},{b}); color: {text};")
-            return styles
-
-        st.dataframe(
-            show[disp_cols].style.format({
-                "CurrentSTF": "{:,.0f}", "Lag1STF": "{:,.0f}",
-                "STF Variance": "{:+.1f}%", "Absolute STF Variance": "{:.1f}%",
-            }).apply(_red_shade, subset=["Absolute STF Variance"]),
-            use_container_width=True, hide_index=True, height=380,
+        st.caption(
+            f"**{n_exceptions}** Key(s) exceed the {threshold_pct}% threshold. "
+            "Cells above the threshold are highlighted; the table is sorted "
+            "worst-first, so the top rows are the Keys to review."
         )
-        csv = exceptions.to_csv(index=False)
-        st.download_button("⬇️ Download exception Keys (CSV)", data=csv,
-                           file_name="stf_exception_keys.csv", mime="text/csv",
-                           key="stf::dl_keys")
+    show = top25.copy()
+    show["STF Variance"] = show["STF Variance"] * 100
+    show["Absolute STF Variance"] = show["Absolute STF Variance"] * 100
+    disp_cols = ["Key", "Business Line", "Ship To Sub Region",
+                 "Arkieva Active Status", "CurrentSTF", "Lag1STF",
+                 "STF Variance", "Absolute STF Variance"]
+    disp_cols = [c for c in disp_cols if c in show.columns]
 
-        # ---- Bar of top exceptions ----------------------------------------
-        top_n = exceptions.head(15)
-        fig_bar = go.Figure(go.Bar(
-            x=(top_n["STF Variance"] * 100).tolist(),
-            y=top_n["Key"].tolist(), orientation="h",
-            marker=dict(
-                color=(top_n["STF Variance"] * 100).tolist(),
-                colorscale="RdBu", cmid=0,
-            ),
-            hovertemplate="%{y}<br>Variance: %{x:+.1f}%<extra></extra>",
-        ))
-        dark_layout(
-            fig_bar, title="Top exception Keys — STF Variance",
-            xaxis_title="STF Variance %", yaxis_title="",
-            height=440, margin=dict(t=50, l=10, r=20, b=50),
-        )
-        fig_bar.update_xaxes(ticksuffix="%")
-        fig_bar.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig_bar, use_container_width=True,
-                        config={"displaylogo": False})
+    # Highlight Absolute STF Variance cells above the threshold in light
+    # red/pink (pure Python — no matplotlib dependency on Streamlit Cloud).
+    thr_display = threshold * 100.0
 
-        # ---- Month highlight for the exception Keys ------------------------
+    def _thr_highlight(col: pd.Series) -> list:
+        return ["background-color: #ff8fa3; color: #0e1117; font-weight: 600;"
+                if float(v) > thr_display else "" for v in col]
+
+    st.dataframe(
+        show[disp_cols].style.format({
+            "CurrentSTF": "{:,.0f}", "Lag1STF": "{:,.0f}",
+            "STF Variance": "{:+.1f}%", "Absolute STF Variance": "{:.1f}%",
+        }).apply(_thr_highlight, subset=["Absolute STF Variance"]),
+        use_container_width=True, hide_index=True, height=380,
+    )
+    csv = top25.to_csv(index=False)
+    st.download_button("⬇️ Download top variation Keys (CSV)", data=csv,
+                       file_name="stf_exception_keys.csv", mime="text/csv",
+                       key="stf::dl_keys")
+
+    # ---- Month highlight for the top Keys -----------------------------------
+    exceptions = var_df[var_df["Absolute STF Variance"] > threshold].head(25)
+    month_pool = exceptions if not exceptions.empty else top25
+    if not month_pool.empty:
         st.markdown("### 🗓️ Which months drive the variation?")
         st.caption("Month-level STF Variance. Red = larger swing; the "
                    "strongest cells are the months to investigate.")
-        month_options = ["(Top 10 exception Keys)"] + exceptions["Key"].tolist()
+        month_options = ["(Top 10 exception Keys)"] + month_pool["Key"].tolist()
         month_scope = st.selectbox("Month-variation scope", month_options,
                                    index=0, key="stf::month_key")
         if month_scope.startswith("(Top 10"):
-            mv_keys = tuple(exceptions["Key"].head(10).tolist())
+            mv_keys = tuple(month_pool["Key"].head(10).tolist())
         else:
             mv_keys = (month_scope,)
         mv = compute_stf_month_variance(filtered, mv_keys, tuple(horizon_months))
@@ -3044,7 +3026,12 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
                     "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
-        adopt_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
+        # The Data filter is dropped (the tab is scoped to the Statistical
+        # Forecast internally) and so is Arkieva Review Req — the on-stat
+        # definition already applies Review Req = No, so the filter is
+        # redundant here.
+        adopt_filter_cols = [c for c in FILTER_COLUMNS
+                             if c not in ("Data", REVIEW_REQ_COL)]
         selections = render_filter_strip(
             long_df, adopt_filter_cols, key_prefix="adopt",
             default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
