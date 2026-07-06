@@ -102,16 +102,21 @@ committed forecast), to surface where the forecast has moved.
 - **Variance** = (Current − Lag 1) / Lag 1, computed per Key over a horizon,
   reported as both signed **STF Variance** and **Absolute STF Variance**,
   sorted high → low by the absolute value.
-- **Month 4 (M4) auto-detection:** the "current month" is the last active
-  month in Sales History; **M4 = current + 4**. (e.g. current = June →
-  M1 July, M2 Aug, M3 Sep, **M4 October**.) M4 is re-detected every time a
-  file is loaded.
-- **Two horizons**, both starting at M4:
-  - **M4 → fiscal year-end** — M4 through December of M4's year
-    (fiscal year is Jan–Dec). e.g. Oct–Dec.
-  - **M4 → next 12 months** — M4 plus the following 11 months (12 total).
-- A **sliding window** slider shortens either horizon from the far end
-  (M4 always stays the start).
+- **Auto-detected horizon start:** the "current month" is the last active
+  month in Sales History; the horizon start is auto-detected at
+  **M4 = current + 4** (e.g. current = June → M4 = October). This is
+  re-detected every time a file is loaded.
+- **Flexible horizon selection:**
+  - A **month-range slider** lets the planner set the **start and end**
+    of the forecasting horizon anywhere within the available forecast
+    months (it defaults to M4 → the last forecast month).
+  - Two **fiscal-year presets** — the **next two full fiscal years**
+    (Jan–Dec) after the current year (e.g. currently in 2026 → **FY 2027**
+    and **FY 2028**) — snap the horizon to a whole year with one click.
+  The presets and the custom range are mutually exclusive; picking a
+  fiscal year disables the slider, and every visual (variance table,
+  month heatmap, waterfall, comparison chart) recomputes for the chosen
+  horizon and reacts to the top filters.
 - A **"History & forecast vintages" chart** right after the headline
   cards overlays the **last 36 months** of **Sales History** and **History
   For Forecast** (ending at the last active history month) with the **next

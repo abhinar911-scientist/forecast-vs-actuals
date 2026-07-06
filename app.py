@@ -1685,32 +1685,48 @@ def stf_m4_month(filtered_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     return (pd.Timestamp(boundary) + pd.DateOffset(months=4)).normalize().replace(day=1)
 
 
-def stf_horizon_months(
+def stf_forecast_months(
     all_months: List[pd.Timestamp],
-    m4: pd.Timestamp,
-    horizon: str = "fiscal_year",
-    window: Optional[int] = None,
+    boundary: Optional[pd.Timestamp],
 ) -> List[pd.Timestamp]:
-    """Return the list of months in the requested horizon, starting at M4.
-
-    * ``horizon='fiscal_year'`` → M4 through December of M4's year.
-    * ``horizon='next_12'``      → M4 plus the following 11 months (12 total).
-
-    If ``window`` is given it caps the number of months returned (the sliding
-    window from M4), so the user can shorten either horizon.
-    """
-    months_sorted = sorted(all_months)
-    if m4 is None:
+    """All forecast months available for STF variation — every month strictly
+    after the history/forecast boundary (the last active Sales-History
+    month). These are the months the planner can pick a range within."""
+    if boundary is None:
         return []
-    if horizon == "fiscal_year":
-        candidate = [m for m in months_sorted
-                     if m >= m4 and m.year == m4.year and m.month <= 12]
-    else:  # next_12
-        future = [m for m in months_sorted if m >= m4]
-        candidate = future[:12]
-    if window is not None:
-        candidate = candidate[:max(1, window)]
-    return candidate
+    return [m for m in sorted(all_months) if m > pd.Timestamp(boundary)]
+
+
+def stf_next_fiscal_years(boundary: Optional[pd.Timestamp], n: int = 2) -> List[int]:
+    """The next ``n`` full fiscal years (Jan–Dec) after the current year.
+
+    The current year is the year of the history/forecast boundary. e.g.
+    boundary in 2026 → [2027, 2028]."""
+    if boundary is None:
+        return []
+    cur_year = pd.Timestamp(boundary).year
+    return [cur_year + i for i in range(1, n + 1)]
+
+
+def stf_fiscal_year_months(
+    all_months: List[pd.Timestamp],
+    year: int,
+) -> List[pd.Timestamp]:
+    """The available months of a fiscal year (Jan–Dec of that year)."""
+    return [m for m in sorted(all_months) if m.year == year]
+
+
+def stf_months_between(
+    all_months: List[pd.Timestamp],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> List[pd.Timestamp]:
+    """Inclusive list of available months in [start, end]."""
+    if start is None or end is None:
+        return []
+    lo, hi = min(start, end), max(start, end)
+    return [m for m in sorted(all_months)
+            if pd.Timestamp(lo) <= m <= pd.Timestamp(hi)]
 
 
 @st.cache_data(show_spinner=False)
@@ -2131,54 +2147,84 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
                 "raw Arkieva export that includes the Lag 1 series.")
         return
 
+    boundary = history_forecast_boundary(filtered)
     m4 = stf_m4_month(filtered)
-    if m4 is None:
-        st.info("Couldn't determine Month 4 (no Sales History for the current "
-                "filter selection).")
+    if boundary is None or m4 is None:
+        st.info("Couldn't determine the forecast horizon (no Sales History "
+                "for the current filter selection).")
         return
 
-    # ---- Horizon + sliding window controls ---------------------------------
-    c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
+    fcst_months = stf_forecast_months(all_months, boundary)
+    if not fcst_months:
+        st.info("No forecast months are available after the last active "
+                "Sales-History month for this selection.")
+        return
+
+    # Auto-detected default start of the forecasting horizon = M4 (falls back
+    # to the first forecast month if M4 is beyond the available range).
+    default_start = m4 if m4 in fcst_months else fcst_months[0]
+    default_end = fcst_months[-1]
+    next_fys = stf_next_fiscal_years(boundary, n=2)
+
+    # ---- Horizon controls: fiscal-year presets + custom month range --------
+    c1, c2 = st.columns([1.1, 1.9])
     with c1:
-        horizon_choice = st.radio(
-            "Horizon", ["M4 → fiscal year-end", "M4 → next 12 months"],
-            key="stf::horizon",
-            help="Fiscal year is Jan–Dec. Horizon 1 runs from M4 to December "
-                 "of M4's year; Horizon 2 is M4 plus the next 11 months.",
+        fy_labels = [f"FY {fy} (Jan–Dec)" for fy in next_fys]
+        mode_options = ["Custom range"] + fy_labels
+        mode = st.radio(
+            "Forecast horizon", mode_options, key="stf::mode",
+            help="Pick a full fiscal year (Jan–Dec) or set a custom start/end "
+                 "month with the slider. The horizon start is auto-detected "
+                 "at M4 (last active Sales-History month + 4).",
         )
-    horizon = "fiscal_year" if horizon_choice.startswith("M4 → fiscal") else "next_12"
-    full_horizon = stf_horizon_months(all_months, m4, horizon=horizon)
-    max_window = len(full_horizon)
+
+    # Resolve the horizon months from the chosen mode.
+    fy_selected = None
+    if mode != "Custom range":
+        fy_selected = next_fys[fy_labels.index(mode)]
+        horizon_months = stf_fiscal_year_months(all_months, fy_selected)
 
     with c2:
-        if max_window >= 2:
-            window = st.slider(
-                "Months from M4 (sliding window)",
-                min_value=1, max_value=max_window, value=max_window, step=1,
-                key="stf::window",
-                help="Shorten the horizon by sliding in from the far end. "
-                     "M4 is always the start.",
+        if len(fcst_months) >= 2:
+            sel_start, sel_end = st.select_slider(
+                "Forecasting horizon months (start → end)",
+                options=fcst_months,
+                value=(default_start, default_end),
+                format_func=lambda d: pd.Timestamp(d).strftime("%b %Y"),
+                key="stf::range",
+                disabled=(mode != "Custom range"),
+                help="Auto-detected start (M4) through the last forecast "
+                     "month. Drag either end to tweak the horizon. Disabled "
+                     "when a fiscal-year preset is selected.",
             )
         else:
-            window = max_window
-            st.caption("Horizon has a single month.")
-    with c3:
-        threshold_pct = st.slider(
-            "Absolute STF variation threshold", min_value=1, max_value=100,
-            value=5, step=1, format="%d%%", key="stf::threshold",
-            help="Keys with Absolute STF Variance above this are flagged as "
-                 "exceptions. Default 5%.",
-        )
+            sel_start = sel_end = fcst_months[0]
+            st.caption("Only one forecast month is available.")
+
+    if mode == "Custom range":
+        horizon_months = stf_months_between(all_months, sel_start, sel_end)
+
+    threshold_pct = st.slider(
+        "Absolute STF variation threshold", min_value=1, max_value=100,
+        value=5, step=1, format="%d%%", key="stf::threshold",
+        help="Keys with Absolute STF Variance above this are flagged as "
+             "exceptions. Default 5%.",
+    )
     threshold = threshold_pct / 100.0
 
-    horizon_months = stf_horizon_months(all_months, m4, horizon=horizon, window=window)
     if not horizon_months:
-        st.info("No forecast months fall in the selected horizon.")
+        if fy_selected is not None:
+            st.info(f"No forecast months are available in FY {fy_selected} "
+                    "for this selection.")
+        else:
+            st.info("No forecast months fall in the selected range.")
         return
 
+    horizon_note = (f"fiscal year **{fy_selected}**" if fy_selected is not None
+                    else "custom range")
     st.caption(
-        f"**M4 = {m4.strftime('%b %Y')}** · horizon "
-        f"**{horizon_months[0].strftime('%b %Y')} – "
+        f"Auto-detected start **M4 = {m4.strftime('%b %Y')}** · showing "
+        f"{horizon_note}: **{horizon_months[0].strftime('%b %Y')} – "
         f"{horizon_months[-1].strftime('%b %Y')}** "
         f"({len(horizon_months)} month(s)) · threshold **{threshold_pct}%**"
     )
