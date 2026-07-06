@@ -96,15 +96,16 @@ for multiple concurrent issues. Keys with no issues are omitted.
 
 ### Tab 2 — STF Variation & Exceptions
 Compares the current **Statistical Forecast Committed (kg)** against the
-**Statistical Forecast Committed Lag 1 (kg)** line (the prior cycle's
-committed forecast), to surface where the forecast has moved.
+**prior-cycle committed** line — labelled *Statistical Forecast Committed
+Lag 1/Lag 2/… (kg)* in the export and normalised on load — to surface where
+the forecast has moved.
 
-- **Variance** = (Current − Lag 1) / Lag 1, computed per Key over a horizon,
+- **Variance** = (Current − Prior) / Prior, computed per Key over a horizon,
   reported as both signed **STF Variance** and **Absolute STF Variance**,
   sorted high → low by the absolute value.
 - **Auto-detected horizon start:** the "current month" is the last active
   month in Sales History; the horizon start is auto-detected at
-  **M4 = current + 4** (e.g. current = June → M4 = October). This is
+  **M4 = current + 4** (e.g. current = July → M4 = November). This is
   re-detected every time a file is loaded.
 - **Flexible horizon selection:**
   - A **month-range slider** lets the planner set the **start and end**
@@ -120,25 +121,33 @@ committed forecast), to surface where the forecast has moved.
 - A **"History & forecast vintages" chart** right after the headline
   cards overlays the **last 36 months** of **Sales History** and **History
   For Forecast** (ending at the last active history month) with the **next
-  24 months** of the **current Statistical Forecast Committed** and
-  **Lag 1** (aggregated over the filter selection, boundary marked) — where
-  the two committed lines separate is where this cycle's forecast changed.
-- An **Absolute STF variation threshold** slider (default **5%**) flags
-  exception Keys. The tab shows the **top 25 Keys by Absolute STF
-  Variance** in a single table (no duplicate chart), with every
-  above-threshold variance cell highlighted in light red so violators
-  stand out at a glance; the table is sorted worst-first and exportable
-  to CSV.
+  24 months** of the **current** and **prior-cycle Statistical Forecast
+  Committed** (aggregated over the filter selection, boundary marked) —
+  where the two committed lines separate is where this cycle's forecast
+  changed.
+- An **Absolute STF variation threshold** slider (default **5%**, **capped
+  at 200%**, laid out compactly beneath the horizon range) flags exception
+  Keys. The tab shows the **top 25 Keys by Absolute STF Variance** in a
+  single table (no duplicate chart), with every above-threshold variance
+  cell highlighted in light red so violators stand out at a glance; the
+  table is sorted worst-first and exportable to CSV.
 - A **month-level heatmap** highlights *which months* drive the variation,
   with its own **scope selector** (top-10 exception Keys, or any single
   exception Key) so the view stays compact.
-- A **waterfall chart** decomposes the net STF change (Current − Lag 1)
-  into **Arkieva Active Status** buckets — Active, Active New, New,
-  New Combination, Sparse, Obsolete, Inactive — so Demand Planners can see
-  where the forecast changes are coming from in Arkieva's own vocabulary
-  (e.g. volume added by new items vs lost from obsolete ones). Rolls up
-  across the filter selection, with a drill-down to any single Key; the
-  bucket deltas reconcile exactly to the net change.
+- A **waterfall chart** decomposes the net STF change (Current − Prior)
+  into **change buckets** based on whether each Key's **Arkieva Active
+  Status** and/or **Arkieva Pattern** changed vs the prior cycle:
+  **No Changes**, **Status Change**, **Pattern Change**, and **Status &
+  Pattern Change**. Each Key falls into exactly one bucket, so the deltas
+  reconcile to the net change.
+- A **change-bucket drill-down** then lets the planner select a bucket
+  (Status / Pattern / Status & Pattern Change) to see the specific
+  **prior → current transitions** driving its STF change — as a horizontal
+  bar chart plus table — so root causes are traceable (e.g. which status or
+  pattern moves added or removed forecast). For the combined bucket a
+  Status/Pattern toggle picks the transition axis. This relies on the
+  export's **Arkieva Active Status Lag 1** and **Arkieva Pattern Lag 1**
+  columns; files without them show everything under *No Changes*.
 - Uses the same cascading filters as *Forecast vs Actuals* **minus the
   Data filter** (the tab is intrinsically scoped to the two committed
   lines), and applies **no Arkieva Active Status default** — all statuses
@@ -283,9 +292,17 @@ front, so you do not need to prepare them:
 `Data` should take the values: `Sales History (kg)`,
 `History For Forecast (kg)`, `Statistical Forecast (kg)` *(or
 "Statistical Forecast Committed (kg)", which is auto-normalised)*,
-`Statistical Forecast Committed Lag 1 (kg)` *(the prior cycle's committed
-forecast, used by the STF Variation & Exceptions tab)*, and
+the prior-cycle committed line *(labelled `Statistical Forecast Committed
+Lag 1 (kg)`, `… Lag 2 (kg)`, etc. — any lag number is auto-normalised to a
+single canonical line used by the STF Variation & Exceptions tab)*, and
 `Final Demand Plan Lag 1 (kg)`.
+
+**Optional prior-cycle attribute columns:** if the export includes
+`Arkieva Active Status Lag 1` and `Arkieva Pattern Lag 1`, the STF
+Variation tab's waterfall uses them to bucket the change by whether each
+Key's status and/or pattern changed vs the prior cycle (and to drill into
+the specific transitions). Files without these columns still work — every
+Key simply falls under *No Changes*.
 
 **Notes on the new columns:**
 - **Arkieva Review Req** replaces the legacy *Stat Flag*; boolean

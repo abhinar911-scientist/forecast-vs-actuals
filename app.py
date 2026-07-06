@@ -275,11 +275,19 @@ ID_COLUMNS: List[str] = [
     "Arkieva ABC",
     "Arkieva Pattern",
     "Arkieva Active Status",
+    "Arkieva Active Status Lag 1",
+    "Arkieva Pattern Lag 1",
     "Arkieva Review Req",
     "Data",
 ]
 
 ACTIVE_STATUS_COL = "Arkieva Active Status"
+PATTERN_COL = "Arkieva Pattern"
+# Prior-cycle (Lag 1) attribute columns, used by the STF driver waterfall to
+# detect status / pattern changes between the current and prior cycle. These
+# are optional — older files without them fall back to "no change".
+ACTIVE_STATUS_LAG_COL = "Arkieva Active Status Lag 1"
+PATTERN_LAG_COL = "Arkieva Pattern Lag 1"
 # By default the app shows only "Active" and "Sparse" keys.
 DEFAULT_ACTIVE_STATUSES = ["Active", "Sparse"]
 
@@ -308,12 +316,17 @@ SALES_HISTORY_LABEL = "Sales History (kg)"
 HISTORY_FOR_FORECAST_LABEL = "History For Forecast (kg)"
 STAT_FORECAST_LABEL = "Statistical Forecast (kg)"
 
-# STF (Statistical Forecast Committed) current vs Lag 1 — used by the
-# "STF Variation & Exceptions" tab. The current committed line is normalised
-# to STAT_FORECAST_LABEL on load, so that label IS the current STF here. The
-# Lag 1 line keeps its own label (it must NOT be normalised away).
+# STF (Statistical Forecast Committed) current vs prior-cycle committed —
+# used by the "STF Variation & Exceptions" tab. The current committed line is
+# normalised to STAT_FORECAST_LABEL on load, so that label IS the current STF.
+# The prior-cycle committed line may be labelled "... Lag 1", "... Lag 2", etc.
+# depending on the export cycle; every such variant is normalised on load to
+# the single canonical STF_LAG1_LABEL so the rest of the app is label-agnostic.
 STF_CURRENT_LABEL = STAT_FORECAST_LABEL
-STF_LAG1_LABEL = "Statistical Forecast Committed Lag 1 (kg)"
+STF_LAG1_LABEL = "Statistical Forecast Committed Lag (kg)"
+# Regex matching any committed-lag variant, e.g. "Statistical Forecast
+# Committed Lag 1 (kg)", "... Lag 2 (kg)", "... Lag 3 (kg)".
+STF_LAG_PATTERN = r"^Statistical Forecast Committed Lag\s*\d+\s*\(kg\)$"
 
 # Some input files label the statistical-forecast line as
 # "Statistical Forecast Committed (kg)". Any of these aliases is normalised
@@ -465,6 +478,14 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
     if ACTIVE_STATUS_COL not in raw.columns:
         raw[ACTIVE_STATUS_COL] = "Active"
 
+    # Optional prior-cycle attribute columns (used by the STF driver
+    # waterfall). When absent, default them to the current-cycle value so the
+    # change detection reports "no change".
+    if ACTIVE_STATUS_LAG_COL not in raw.columns:
+        raw[ACTIVE_STATUS_LAG_COL] = raw[ACTIVE_STATUS_COL]
+    if PATTERN_LAG_COL not in raw.columns:
+        raw[PATTERN_LAG_COL] = raw[PATTERN_COL]
+
     # ---- Validate the raw identifier columns -------------------------------
     missing = [c for c in RAW_ID_COLUMNS if c not in raw.columns]
     if missing:
@@ -523,6 +544,17 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
     long_df["Data"] = long_df["Data"].replace(
         "Statistical Forecast Committed (kg)", STAT_FORECAST_LABEL
     )
+    # Normalise the prior-cycle committed line ("... Lag 1/2/3 (kg)") to the
+    # single canonical STF_LAG1_LABEL so the STF variance engine is agnostic
+    # to which lag cycle the export carries.
+    long_df["Data"] = long_df["Data"].str.replace(
+        STF_LAG_PATTERN, STF_LAG1_LABEL, regex=True
+    )
+
+    # Clean the prior-cycle attribute columns to readable strings.
+    for c in (ACTIVE_STATUS_LAG_COL, PATTERN_LAG_COL):
+        if c in long_df.columns:
+            long_df[c] = long_df[c].astype(str).str.strip()
 
     # Normalise the Arkieva Review Req values to readable strings (the raw
     # file stores booleans True/False).
@@ -1663,13 +1695,22 @@ def stat_adoption_material_table(
 # ---------------------------------------------------------------------------
 # STF Variation & Exceptions engine
 # ---------------------------------------------------------------------------
-# The waterfall decomposes the net STF change by each row's **Arkieva Active
-# Status** — the Demand Planner's own classification of where forecast is
-# coming from (new items, sparse, obsolete, …). Every data row carries exactly
-# one status, so the per-status deltas reconcile exactly to the net change.
-# Display order for the buckets (statuses absent from the data are skipped):
-STF_STATUS_ORDER = ["Active", "Active New", "New", "New Combination",
-                    "Sparse", "Obsolete", "Inactive", "-"]
+# The waterfall decomposes the net STF change (current − prior committed) into
+# **change buckets** derived from whether each Key's Arkieva Active Status
+# and/or Arkieva Pattern changed between the current and prior cycle:
+#   • No Changes             — status same AND pattern same
+#   • Pattern Change         — pattern differs, status same
+#   • Status Change          — status differs, pattern same
+#   • Status & Pattern Change— both differ
+# Every Key falls into exactly one bucket, so the per-bucket deltas reconcile
+# exactly to the net change. Drill-down then shows the specific status or
+# pattern transitions (from → to) driving each change bucket.
+STF_BUCKET_NONE = "No Changes"
+STF_BUCKET_PATTERN = "Pattern Change"
+STF_BUCKET_STATUS = "Status Change"
+STF_BUCKET_BOTH = "Status & Pattern Change"
+STF_BUCKET_ORDER = [STF_BUCKET_NONE, STF_BUCKET_STATUS,
+                    STF_BUCKET_PATTERN, STF_BUCKET_BOTH]
 
 
 def stf_m4_month(filtered_df: pd.DataFrame) -> Optional[pd.Timestamp]:
@@ -1823,26 +1864,62 @@ def compute_stf_month_variance(
     return piv[cols]
 
 
+def _stf_key_attributes(sub: pd.DataFrame) -> pd.DataFrame:
+    """One row per Key with current & prior-cycle status/pattern and the
+    change-bucket classification. ``sub`` must already be filtered to the STF
+    rows of interest."""
+    attr_cols = ["Key", ACTIVE_STATUS_COL, PATTERN_COL]
+    has_lag_status = ACTIVE_STATUS_LAG_COL in sub.columns
+    has_lag_pattern = PATTERN_LAG_COL in sub.columns
+    if has_lag_status:
+        attr_cols.append(ACTIVE_STATUS_LAG_COL)
+    if has_lag_pattern:
+        attr_cols.append(PATTERN_LAG_COL)
+    attrs = sub[attr_cols].drop_duplicates(subset=["Key"]).set_index("Key")
+
+    cur_status = attrs[ACTIVE_STATUS_COL].astype(str)
+    lag_status = (attrs[ACTIVE_STATUS_LAG_COL].astype(str)
+                  if has_lag_status else cur_status)
+    cur_pat = attrs[PATTERN_COL].astype(str)
+    lag_pat = (attrs[PATTERN_LAG_COL].astype(str)
+               if has_lag_pattern else cur_pat)
+
+    status_changed = cur_status.values != lag_status.values
+    pattern_changed = cur_pat.values != lag_pat.values
+
+    bucket = np.where(
+        status_changed & pattern_changed, STF_BUCKET_BOTH,
+        np.where(status_changed, STF_BUCKET_STATUS,
+                 np.where(pattern_changed, STF_BUCKET_PATTERN,
+                          STF_BUCKET_NONE)))
+    out = pd.DataFrame({
+        "Key": attrs.index,
+        "CurStatus": cur_status.values, "LagStatus": lag_status.values,
+        "CurPattern": cur_pat.values, "LagPattern": lag_pat.values,
+        "Bucket": bucket,
+    })
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def compute_stf_drivers(
     filtered_df: pd.DataFrame,
     horizon_months: Tuple[pd.Timestamp, ...],
     keys: Optional[Tuple[str, ...]] = None,
 ) -> pd.DataFrame:
-    """Decompose the net STF change (current − lag1) over the horizon into
-    **Arkieva Active Status** buckets for the waterfall chart.
+    """Decompose the net STF change (current − prior committed) over the
+    horizon into **change buckets** based on whether each Key's Arkieva
+    Active Status and/or Arkieva Pattern changed between the current and
+    prior cycle: No Changes, Status Change, Pattern Change, Status & Pattern
+    Change.
 
-    Every data row carries exactly one Arkieva Active Status (Active,
-    Active New, New, New Combination, Sparse, Obsolete, Inactive, …), so
-    Delta(status) = Σ current(status) − Σ lag1(status) and the bucket sums
-    reconcile exactly to the net change. This lets Demand Planners read the
-    waterfall in Arkieva's own vocabulary — e.g. forecast added by *Active
-    New*/*New* items vs forecast lost from *Obsolete*/*Inactive* ones.
+    Each Key's net delta (Σ current − Σ prior over the horizon) is assigned to
+    exactly one bucket, so the bucket sums reconcile exactly to the overall
+    net change. When ``keys`` is given the decomposition is restricted to
+    those Keys (drill-down); otherwise it rolls up across ``filtered_df``.
 
-    Returns [Driver, Delta] where Driver is the status, ordered per
-    STF_STATUS_ORDER (statuses with no data in the horizon are skipped).
-    When ``keys`` is given the decomposition is restricted to those Keys
-    (single-Key drill-down); otherwise it rolls up across ``filtered_df``.
+    Returns [Driver, Delta] ordered per STF_BUCKET_ORDER (empty buckets are
+    skipped).
     """
     cols = ["Driver", "Delta"]
     if filtered_df.empty or not horizon_months:
@@ -1858,21 +1935,86 @@ def compute_stf_drivers(
     if sub.empty:
         return pd.DataFrame(columns=cols)
 
-    # Σ per (status, series), then Delta = current − lag1 per status.
-    grp = (sub.groupby([ACTIVE_STATUS_COL, "Data"], as_index=False)["Value"]
-           .sum()
-           .pivot(index=ACTIVE_STATUS_COL, columns="Data", values="Value"))
-    grp = grp.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
-    grp["Delta"] = grp[STF_CURRENT_LABEL] - grp[STF_LAG1_LABEL]
+    # Per-Key net delta over the horizon.
+    key_delta = (sub.assign(
+        _signed=np.where(sub["Data"].values == STF_CURRENT_LABEL,
+                         sub["Value"].values, -sub["Value"].values))
+        .groupby("Key", as_index=False)["_signed"].sum()
+        .rename(columns={"_signed": "Delta"}))
 
-    # Order buckets per STF_STATUS_ORDER; append any unexpected statuses at
-    # the end so the decomposition always reconciles.
-    present = list(grp.index)
-    ordered = [s for s in STF_STATUS_ORDER if s in present] + \
-              [s for s in present if s not in STF_STATUS_ORDER]
-    rows = [{"Driver": s, "Delta": float(grp.loc[s, "Delta"])}
-            for s in ordered]
+    # Attach the change bucket per Key and sum deltas by bucket.
+    attrs = _stf_key_attributes(sub)
+    merged = key_delta.merge(attrs[["Key", "Bucket"]], on="Key", how="left")
+    bucket_delta = merged.groupby("Bucket", as_index=False)["Delta"].sum()
+    by_bucket = dict(zip(bucket_delta["Bucket"], bucket_delta["Delta"]))
+
+    rows = [{"Driver": b, "Delta": float(by_bucket[b])}
+            for b in STF_BUCKET_ORDER if b in by_bucket]
     return pd.DataFrame(rows, columns=cols)
+
+
+@st.cache_data(show_spinner=False)
+def compute_stf_driver_breakdown(
+    filtered_df: pd.DataFrame,
+    horizon_months: Tuple[pd.Timestamp, ...],
+    bucket: str,
+    keys: Optional[Tuple[str, ...]] = None,
+    axis: Optional[str] = None,
+) -> pd.DataFrame:
+    """Drill-down for a change bucket: what specific transitions drive it.
+
+    * For **Status Change** → group by the status transition
+      ``LagStatus → CurStatus``.
+    * For **Pattern Change** → group by the pattern transition
+      ``LagPattern → CurPattern``.
+    * For **Status & Pattern Change** → group by ``axis`` (defaults to status;
+      pass ``axis='pattern'`` to view the pattern transitions instead).
+
+    Returns [Transition, Delta, Keys] sorted by |Delta| desc, so a Demand
+    Planner sees which from→to moves account for the bucket's STF change.
+    """
+    cols = ["Transition", "Delta", "Keys"]
+    if filtered_df.empty or not horizon_months or not bucket:
+        return pd.DataFrame(columns=cols)
+
+    if axis is None:
+        axis = "pattern" if bucket == STF_BUCKET_PATTERN else "status"
+
+    hz = list(horizon_months)
+    sub = filtered_df[
+        filtered_df["Data"].isin([STF_CURRENT_LABEL, STF_LAG1_LABEL])
+        & filtered_df["Date"].isin(hz)
+    ]
+    if keys:
+        sub = sub[sub["Key"].isin(set(keys))]
+    if sub.empty:
+        return pd.DataFrame(columns=cols)
+
+    key_delta = (sub.assign(
+        _signed=np.where(sub["Data"].values == STF_CURRENT_LABEL,
+                         sub["Value"].values, -sub["Value"].values))
+        .groupby("Key", as_index=False)["_signed"].sum()
+        .rename(columns={"_signed": "Delta"}))
+
+    attrs = _stf_key_attributes(sub)
+    attrs = attrs[attrs["Bucket"] == bucket]
+    if attrs.empty:
+        return pd.DataFrame(columns=cols)
+
+    if axis == "pattern":
+        attrs = attrs.assign(
+            Transition=attrs["LagPattern"] + " → " + attrs["CurPattern"])
+    else:
+        attrs = attrs.assign(
+            Transition=attrs["LagStatus"] + " → " + attrs["CurStatus"])
+
+    merged = key_delta.merge(attrs[["Key", "Transition"]], on="Key",
+                             how="inner")
+    grp = (merged.groupby("Transition", as_index=False)
+           .agg(Delta=("Delta", "sum"), Keys=("Key", "nunique")))
+    grp["_abs"] = grp["Delta"].abs()
+    grp = grp.sort_values("_abs", ascending=False).drop(columns="_abs")
+    return grp[cols].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2142,9 +2284,10 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
 
     # Need both current STF and Lag 1 to compute variance.
     if STF_LAG1_LABEL not in long_df["Data"].unique():
-        st.info("This file has no **Statistical Forecast Committed Lag 1 (kg)** "
-                "line, so STF variation cannot be computed. Please upload the "
-                "raw Arkieva export that includes the Lag 1 series.")
+        st.info("This file has no **Statistical Forecast Committed** prior-"
+                "cycle line (e.g. *… Lag 1/Lag 2 (kg)*), so STF variation "
+                "cannot be computed. Please upload the raw Arkieva export that "
+                "includes the prior-cycle committed series.")
         return
 
     boundary = history_forecast_boundary(filtered)
@@ -2201,16 +2344,21 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             sel_start = sel_end = fcst_months[0]
             st.caption("Only one forecast month is available.")
 
+        # Threshold sits directly under the horizon range, in a narrower
+        # column so it doesn't span the full width. Capped at 200%.
+        tcol, _tspacer = st.columns([2, 1])
+        with tcol:
+            threshold_pct = st.slider(
+                "Absolute STF variation threshold", min_value=1,
+                max_value=200, value=5, step=1, format="%d%%",
+                key="stf::threshold",
+                help="Keys with Absolute STF Variance above this are flagged "
+                     "as exceptions. Default 5%, max 200%.",
+            )
+    threshold = threshold_pct / 100.0
+
     if mode == "Custom range":
         horizon_months = stf_months_between(all_months, sel_start, sel_end)
-
-    threshold_pct = st.slider(
-        "Absolute STF variation threshold", min_value=1, max_value=100,
-        value=5, step=1, format="%d%%", key="stf::threshold",
-        help="Keys with Absolute STF Variance above this are flagged as "
-             "exceptions. Default 5%.",
-    )
-    threshold = threshold_pct / 100.0
 
     if not horizon_months:
         if fy_selected is not None:
@@ -2275,7 +2423,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
              SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"], hist_start, boundary),
             (STF_CURRENT_LABEL, "Statistical Forecast Committed (next 24m)",
              SERIES_STYLE[STAT_FORECAST_LABEL]["color"], fcst_start, fcst_end),
-            (STF_LAG1_LABEL, "Statistical Forecast Committed Lag 1 (next 24m)",
+            (STF_LAG1_LABEL, "Statistical Forecast Committed — prior cycle (next 24m)",
              "#c084fc", fcst_start, fcst_end),
         ]
         cmp_agg = (filtered[filtered["Data"].isin([s[0] for s in cmp_series])]
@@ -2389,30 +2537,24 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             st.plotly_chart(fig_hm, use_container_width=True,
                             config={"displaylogo": False})
 
-    # ---- Waterfall: variation drivers by Arkieva Active Status -------------
+    # ---- Waterfall: variation drivers by change bucket ---------------------
     st.markdown("### 💧 STF variation drivers (waterfall)")
     st.caption(
-        "Decomposes the net STF change (Current − Lag 1) into **Arkieva "
-        "Active Status** buckets — Active, Active New, New, Sparse, Obsolete, "
-        "Inactive, … — so you can see where the forecast changes are coming "
-        "from (e.g. volume added by new items vs lost from obsolete ones). "
-        "Rolls up across the current filter selection; pick a single Key to "
-        "drill down."
+        "Decomposes the net STF change (Current − prior committed) into "
+        "**change buckets** based on whether each Key's **Arkieva Active "
+        "Status** and/or **Arkieva Pattern** changed vs the prior cycle: "
+        "**No Changes**, **Status Change**, **Pattern Change**, and "
+        "**Status & Pattern Change**. Rolls up across the current filter "
+        "selection; the bucket deltas reconcile to the net change."
     )
-    drill_options = ["(All Keys — roll-up)"] + var_df["Key"].tolist()
-    drill_key = st.selectbox("Driver scope", drill_options, index=0,
-                             key="stf::driver_key")
-    keys_arg = None if drill_key.startswith("(All") else (drill_key,)
-    drivers = compute_stf_drivers(filtered, tuple(horizon_months), keys=keys_arg)
+    drivers = compute_stf_drivers(filtered, tuple(horizon_months))
 
     if drivers.empty or drivers["Delta"].abs().sum() == 0:
         st.info("No driver decomposition available for this selection.")
     else:
-        lag_base = net_lag if keys_arg is None else \
-            var_df.loc[var_df["Key"] == drill_key, "Lag1STF"].sum()
         measures = ["absolute"] + ["relative"] * len(drivers) + ["total"]
-        x_labels = ["Lag 1 base"] + drivers["Driver"].tolist() + ["Current"]
-        y_vals = [lag_base] + drivers["Delta"].tolist() + [None]
+        x_labels = ["Prior committed"] + drivers["Driver"].tolist() + ["Current"]
+        y_vals = [net_lag] + drivers["Delta"].tolist() + [None]
         fig_wf = go.Figure(go.Waterfall(
             orientation="v", measure=measures, x=x_labels, y=y_vals,
             connector=dict(line=dict(color=DARK_MUTED)),
@@ -2422,8 +2564,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             hovertemplate="%{x}<br>%{y:,.0f} kg<extra></extra>",
         ))
         dark_layout(
-            fig_wf,
-            title=f"STF change decomposition — {'roll-up' if keys_arg is None else drill_key}",
+            fig_wf, title="STF change decomposition by change bucket",
             xaxis_title="", yaxis_title="Forecast volume (kg)",
             height=440, margin=dict(t=60, l=60, r=30, b=110),
             showlegend=False,
@@ -2436,10 +2577,86 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
         dr_show["% of gross change"] = np.where(
             total_abs != 0, dr_show["Delta"].abs() / total_abs * 100, 0.0)
         st.dataframe(
-            dr_show.style.format({"Delta": "{:,.0f}",
-                                  "% of gross change": "{:.1f}%"}),
+            dr_show.rename(columns={"Driver": "Change bucket"}).style.format(
+                {"Delta": "{:,.0f}", "% of gross change": "{:.1f}%"}),
             use_container_width=True, hide_index=True,
         )
+
+        # ---- Drill-down: what drives a change bucket -----------------------
+        st.markdown("#### 🔍 Drill down into a change bucket")
+        st.caption(
+            "Pick a change bucket to see the specific **status / pattern "
+            "transitions** (prior → current) driving its STF change, so you "
+            "can trace the root cause."
+        )
+        # Only offer buckets that represent an actual change and are present.
+        changeable = [b for b in (STF_BUCKET_STATUS, STF_BUCKET_PATTERN,
+                                   STF_BUCKET_BOTH)
+                      if b in set(drivers["Driver"])]
+        if not changeable:
+            st.info("No Keys changed status or pattern vs the prior cycle in "
+                    "this horizon, so there's nothing to drill into "
+                    "(everything sits in **No Changes**).")
+        else:
+            dcol1, dcol2 = st.columns([1.3, 1.0])
+            with dcol1:
+                sel_bucket = st.selectbox(
+                    "Change bucket", changeable, index=0,
+                    key="stf::drill_bucket")
+            # For the combined bucket, let the planner choose which axis to
+            # view the transitions by.
+            axis_bucket = sel_bucket
+            if sel_bucket == STF_BUCKET_BOTH:
+                with dcol2:
+                    axis = st.radio(
+                        "View transitions by", ["Status", "Pattern"],
+                        key="stf::drill_axis", horizontal=True)
+                # Reuse the breakdown fn: STATUS bucket → status axis,
+                # PATTERN bucket → pattern axis. For BOTH, pick accordingly.
+                axis_bucket = (STF_BUCKET_STATUS if axis == "Status"
+                               else STF_BUCKET_PATTERN)
+
+            # compute breakdown: filter keys to the selected change bucket,
+            # group by the chosen transition axis (status/pattern).
+            if sel_bucket == STF_BUCKET_BOTH:
+                bd = compute_stf_driver_breakdown(
+                    filtered, tuple(horizon_months), STF_BUCKET_BOTH,
+                    axis="pattern" if axis_bucket == STF_BUCKET_PATTERN
+                    else "status")
+            else:
+                bd = compute_stf_driver_breakdown(
+                    filtered, tuple(horizon_months), sel_bucket)
+
+            if bd.empty:
+                st.info("No transitions found for this bucket.")
+            else:
+                bd_plot = bd.sort_values("Delta")
+                fig_bd = go.Figure(go.Bar(
+                    x=bd_plot["Delta"].tolist(),
+                    y=bd_plot["Transition"].tolist(),
+                    orientation="h",
+                    marker=dict(color=[("#51cf66" if v >= 0 else "#ff6b6b")
+                                       for v in bd_plot["Delta"]]),
+                    customdata=bd_plot["Keys"].tolist(),
+                    hovertemplate="%{y}<br>%{x:,.0f} kg<br>%{customdata} "
+                                  "Key(s)<extra></extra>",
+                ))
+                dark_layout(
+                    fig_bd,
+                    title=f"{sel_bucket} — transitions driving the STF change",
+                    xaxis_title="STF change (kg)", yaxis_title="",
+                    height=max(300, 34 * len(bd_plot) + 120),
+                    margin=dict(t=60, l=200, r=30, b=50), showlegend=False,
+                )
+                st.plotly_chart(fig_bd, use_container_width=True,
+                                config={"displaylogo": False})
+                st.dataframe(
+                    bd.rename(columns={"Transition": "Transition (prior → current)",
+                                       "Delta": "STF change (kg)",
+                                       "Keys": "# Keys"}).style.format(
+                        {"STF change (kg)": "{:,.0f}"}),
+                    use_container_width=True, hide_index=True,
+                )
 
 
 # ---------------------------------------------------------------------------
