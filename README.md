@@ -135,11 +135,19 @@ the forecast has moved.
   with its own **scope selector** (top-10 exception Keys, or any single
   exception Key) so the view stays compact.
 - A **waterfall chart** decomposes the net STF change (Current − Prior)
-  into **change buckets** based on whether each Key's **Arkieva Active
-  Status** and/or **Arkieva Pattern** changed vs the prior cycle:
+  into **change buckets** based on whether each granular unit's **Arkieva
+  Active Status** and/or **Arkieva Pattern** changed vs the prior cycle:
   **No Changes**, **Status Change**, **Pattern Change**, and **Status &
-  Pattern Change**. Each Key falls into exactly one bucket, so the deltas
-  reconcile to the net change.
+  Pattern Change**. Classification is done at the **granular level**
+  (a Key can carry several statuses, each classified on its own), so the
+  bucket deltas are correct and reconcile to the net change. Only buckets
+  that occur in the data appear — if, in a given file, every changed unit
+  happens to change *both* status and pattern together, only *No Changes*
+  and *Status & Pattern Change* show up; the other two populate as soon as
+  status-only or pattern-only moves exist. Blank/placeholder values (empty,
+  `nan`, `n/a`, …) are normalised so a placeholder-to-placeholder move
+  isn't mistaken for a real change, while genuine states like `Unknown` and
+  `-` are treated as distinct.
 - A **change-bucket drill-down** then lets the planner select a bucket
   (Status / Pattern / Status & Pattern Change) to see the specific
   **prior → current transitions** driving its STF change — as a horizontal

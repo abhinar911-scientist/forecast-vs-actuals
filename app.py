@@ -1864,18 +1864,48 @@ def compute_stf_month_variance(
     return piv[cols]
 
 
-def _stf_key_attributes(sub: pd.DataFrame) -> pd.DataFrame:
-    """One row per Key with current & prior-cycle status/pattern and the
-    change-bucket classification. ``sub`` must already be filtered to the STF
-    rows of interest."""
-    attr_cols = ["Key", ACTIVE_STATUS_COL, PATTERN_COL]
+# The change-bucket classification operates at the granular grain — a single
+# Key can span several rows with different Arkieva Active Status / Pattern, so
+# classifying at Key level would collapse (and misattribute) those. The grain
+# is Key + current status + current pattern + prior-cycle status + pattern.
+STF_GRAIN_COLS = ["Key", ACTIVE_STATUS_COL, PATTERN_COL,
+                  ACTIVE_STATUS_LAG_COL, PATTERN_LAG_COL]
+
+# Attribute values that all mean "no meaningful value" and must compare equal
+# to each other, so a placeholder-to-placeholder move (e.g. "" ↔ "nan") is not
+# mistaken for a real status/pattern change. Note: "-" and "Unknown" are NOT
+# folded together — those are distinct Arkieva states and a move between them
+# is a genuine change.
+_STF_ATTR_BLANKS = {"", "nan", "none", "null", "na", "n/a"}
+
+
+def _stf_norm_attr(series: pd.Series) -> pd.Series:
+    """Normalise an attribute column for robust change comparison: cast to
+    string, strip surrounding whitespace, and map blank/placeholder tokens to
+    a single canonical empty string."""
+    s = series.astype(str).str.strip()
+    return s.mask(s.str.lower().isin(_STF_ATTR_BLANKS), "")
+
+
+def _stf_grain_classified(sub: pd.DataFrame) -> pd.DataFrame:
+    """Classify each granular row (Key + current & prior status/pattern) into
+    a change bucket. ``sub`` must already be filtered to the STF rows of
+    interest. Returns one row per granular combination with the current/prior
+    status & pattern and the change ``Bucket``.
+
+    Operating at this grain (not Key level) is essential: a Key legitimately
+    carries multiple statuses, and each must be classified on its own so the
+    per-bucket deltas are correct and reconcile to the net change.
+    """
     has_lag_status = ACTIVE_STATUS_LAG_COL in sub.columns
     has_lag_pattern = PATTERN_LAG_COL in sub.columns
+
+    grp_cols = ["Key", ACTIVE_STATUS_COL, PATTERN_COL]
     if has_lag_status:
-        attr_cols.append(ACTIVE_STATUS_LAG_COL)
+        grp_cols.append(ACTIVE_STATUS_LAG_COL)
     if has_lag_pattern:
-        attr_cols.append(PATTERN_LAG_COL)
-    attrs = sub[attr_cols].drop_duplicates(subset=["Key"]).set_index("Key")
+        grp_cols.append(PATTERN_LAG_COL)
+    attrs = sub[grp_cols].drop_duplicates().reset_index(drop=True)
 
     cur_status = attrs[ACTIVE_STATUS_COL].astype(str)
     lag_status = (attrs[ACTIVE_STATUS_LAG_COL].astype(str)
@@ -1884,21 +1914,65 @@ def _stf_key_attributes(sub: pd.DataFrame) -> pd.DataFrame:
     lag_pat = (attrs[PATTERN_LAG_COL].astype(str)
                if has_lag_pattern else cur_pat)
 
-    status_changed = cur_status.values != lag_status.values
-    pattern_changed = cur_pat.values != lag_pat.values
-
+    # Compare on normalised values so blank/placeholder tokens don't create
+    # spurious changes, while keeping the display values as-is.
+    status_changed = (_stf_norm_attr(cur_status).values
+                      != _stf_norm_attr(lag_status).values)
+    pattern_changed = (_stf_norm_attr(cur_pat).values
+                       != _stf_norm_attr(lag_pat).values)
     bucket = np.where(
         status_changed & pattern_changed, STF_BUCKET_BOTH,
         np.where(status_changed, STF_BUCKET_STATUS,
                  np.where(pattern_changed, STF_BUCKET_PATTERN,
                           STF_BUCKET_NONE)))
+
     out = pd.DataFrame({
-        "Key": attrs.index,
+        "Key": attrs["Key"].values,
         "CurStatus": cur_status.values, "LagStatus": lag_status.values,
         "CurPattern": cur_pat.values, "LagPattern": lag_pat.values,
         "Bucket": bucket,
     })
     return out
+
+
+def _stf_grain_delta(sub: pd.DataFrame) -> pd.DataFrame:
+    """Per granular-group net STF delta over the horizon (Σ current − Σ prior),
+    keyed by Key + current & prior status/pattern, joined to the change
+    bucket. ``sub`` is already restricted to the STF rows of the horizon."""
+    has_lag_status = ACTIVE_STATUS_LAG_COL in sub.columns
+    has_lag_pattern = PATTERN_LAG_COL in sub.columns
+    grp_cols = ["Key", ACTIVE_STATUS_COL, PATTERN_COL]
+    if has_lag_status:
+        grp_cols.append(ACTIVE_STATUS_LAG_COL)
+    if has_lag_pattern:
+        grp_cols.append(PATTERN_LAG_COL)
+
+    signed = sub.assign(
+        _signed=np.where(sub["Data"].values == STF_CURRENT_LABEL,
+                         sub["Value"].values, -sub["Value"].values))
+    gd = signed.groupby(grp_cols, as_index=False)["_signed"].sum() \
+        .rename(columns={"_signed": "Delta"})
+
+    cur_status = gd[ACTIVE_STATUS_COL].astype(str)
+    lag_status = (gd[ACTIVE_STATUS_LAG_COL].astype(str)
+                  if has_lag_status else cur_status)
+    cur_pat = gd[PATTERN_COL].astype(str)
+    lag_pat = (gd[PATTERN_LAG_COL].astype(str)
+               if has_lag_pattern else cur_pat)
+    status_changed = (_stf_norm_attr(cur_status).values
+                      != _stf_norm_attr(lag_status).values)
+    pattern_changed = (_stf_norm_attr(cur_pat).values
+                       != _stf_norm_attr(lag_pat).values)
+    gd["Bucket"] = np.where(
+        status_changed & pattern_changed, STF_BUCKET_BOTH,
+        np.where(status_changed, STF_BUCKET_STATUS,
+                 np.where(pattern_changed, STF_BUCKET_PATTERN,
+                          STF_BUCKET_NONE)))
+    gd["CurStatus"] = cur_status.values
+    gd["LagStatus"] = lag_status.values
+    gd["CurPattern"] = cur_pat.values
+    gd["LagPattern"] = lag_pat.values
+    return gd
 
 
 @st.cache_data(show_spinner=False)
@@ -1908,15 +1982,16 @@ def compute_stf_drivers(
     keys: Optional[Tuple[str, ...]] = None,
 ) -> pd.DataFrame:
     """Decompose the net STF change (current − prior committed) over the
-    horizon into **change buckets** based on whether each Key's Arkieva
-    Active Status and/or Arkieva Pattern changed between the current and
-    prior cycle: No Changes, Status Change, Pattern Change, Status & Pattern
-    Change.
+    horizon into **change buckets** based on whether each granular unit's
+    Arkieva Active Status and/or Arkieva Pattern changed vs the prior cycle:
+    No Changes, Status Change, Pattern Change, Status & Pattern Change.
 
-    Each Key's net delta (Σ current − Σ prior over the horizon) is assigned to
-    exactly one bucket, so the bucket sums reconcile exactly to the overall
-    net change. When ``keys`` is given the decomposition is restricted to
-    those Keys (drill-down); otherwise it rolls up across ``filtered_df``.
+    Classification is at the granular grain (Key + status + pattern), because a
+    single Key can carry several statuses; each granular unit's net delta
+    (Σ current − Σ prior over the horizon) is assigned to exactly one bucket,
+    so the bucket sums reconcile exactly to the overall net change. When
+    ``keys`` is given the decomposition is restricted to those Keys (drill-
+    down); otherwise it rolls up across ``filtered_df``.
 
     Returns [Driver, Delta] ordered per STF_BUCKET_ORDER (empty buckets are
     skipped).
@@ -1935,17 +2010,8 @@ def compute_stf_drivers(
     if sub.empty:
         return pd.DataFrame(columns=cols)
 
-    # Per-Key net delta over the horizon.
-    key_delta = (sub.assign(
-        _signed=np.where(sub["Data"].values == STF_CURRENT_LABEL,
-                         sub["Value"].values, -sub["Value"].values))
-        .groupby("Key", as_index=False)["_signed"].sum()
-        .rename(columns={"_signed": "Delta"}))
-
-    # Attach the change bucket per Key and sum deltas by bucket.
-    attrs = _stf_key_attributes(sub)
-    merged = key_delta.merge(attrs[["Key", "Bucket"]], on="Key", how="left")
-    bucket_delta = merged.groupby("Bucket", as_index=False)["Delta"].sum()
+    gd = _stf_grain_delta(sub)
+    bucket_delta = gd.groupby("Bucket", as_index=False)["Delta"].sum()
     by_bucket = dict(zip(bucket_delta["Bucket"], bucket_delta["Delta"]))
 
     rows = [{"Driver": b, "Delta": float(by_bucket[b])}
@@ -1990,27 +2056,18 @@ def compute_stf_driver_breakdown(
     if sub.empty:
         return pd.DataFrame(columns=cols)
 
-    key_delta = (sub.assign(
-        _signed=np.where(sub["Data"].values == STF_CURRENT_LABEL,
-                         sub["Value"].values, -sub["Value"].values))
-        .groupby("Key", as_index=False)["_signed"].sum()
-        .rename(columns={"_signed": "Delta"}))
-
-    attrs = _stf_key_attributes(sub)
-    attrs = attrs[attrs["Bucket"] == bucket]
-    if attrs.empty:
+    # Granular-grain deltas already carry the change bucket and transitions.
+    gd = _stf_grain_delta(sub)
+    gd = gd[gd["Bucket"] == bucket]
+    if gd.empty:
         return pd.DataFrame(columns=cols)
 
     if axis == "pattern":
-        attrs = attrs.assign(
-            Transition=attrs["LagPattern"] + " → " + attrs["CurPattern"])
+        gd = gd.assign(Transition=gd["LagPattern"] + " → " + gd["CurPattern"])
     else:
-        attrs = attrs.assign(
-            Transition=attrs["LagStatus"] + " → " + attrs["CurStatus"])
+        gd = gd.assign(Transition=gd["LagStatus"] + " → " + gd["CurStatus"])
 
-    merged = key_delta.merge(attrs[["Key", "Transition"]], on="Key",
-                             how="inner")
-    grp = (merged.groupby("Transition", as_index=False)
+    grp = (gd.groupby("Transition", as_index=False)
            .agg(Delta=("Delta", "sum"), Keys=("Key", "nunique")))
     grp["_abs"] = grp["Delta"].abs()
     grp = grp.sort_values("_abs", ascending=False).drop(columns="_abs")
