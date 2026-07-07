@@ -134,26 +134,34 @@ the forecast has moved.
 - A **month-level heatmap** highlights *which months* drive the variation,
   with its own **scope selector** (top-10 exception Keys, or any single
   exception Key) so the view stays compact.
-- A **waterfall chart** decomposes the net STF change (Current − Prior)
-  into **change buckets** based on whether each granular unit's **Arkieva
-  Active Status** and/or **Arkieva Pattern** changed vs the prior cycle:
-  **No Changes**, **Status Change**, **Pattern Change**, and **Status &
-  Pattern Change**. Classification is done at the **granular level**
-  (a Key can carry several statuses, each classified on its own), so the
-  bucket deltas are correct and reconcile to the net change. Only buckets
-  that occur in the data appear — if, in a given file, every changed unit
-  happens to change *both* status and pattern together, only *No Changes*
-  and *Status & Pattern Change* show up; the other two populate as soon as
-  status-only or pattern-only moves exist. Blank/placeholder values (empty,
-  `nan`, `n/a`, …) are normalised so a placeholder-to-placeholder move
-  isn't mistaken for a real change, while genuine states like `Unknown` and
-  `-` are treated as distinct.
-- A **change-bucket drill-down** then lets the planner select a bucket
-  (Status / Pattern / Status & Pattern Change) to see the specific
-  **prior → current transitions** driving its STF change — as a horizontal
-  bar chart plus table — so root causes are traceable (e.g. which status or
-  pattern moves added or removed forecast). For the combined bucket a
-  Status/Pattern toggle picks the transition axis. This relies on the
+- A **Top 25 Materials — STF change split** chart (a horizontal stacked
+  bar) ranks the 25 Materials with the largest **absolute STF deviation**
+  (Current − prior committed) over the horizon, and splits each Material's
+  bar into the change buckets **No Changes**, **Status Change**, **Pattern
+  Change**, and **Status & Pattern Change**. An accompanying table gives
+  each Material's split in both **kg** (per bucket, net, and total absolute
+  deviation) and **%** (each bucket's share of the Material's gross change),
+  and is exportable to CSV. The chart and table react to the top filters and
+  the horizon selection.
+- **How the change split is derived — unique key + flags.** Changes are
+  tracked at the **unique key** that identifies a forecast line across
+  cycles: *Business Line + Material + Ship To Sub Region + Arkieva Active
+  Status + Arkieva Pattern* (collision-free, unlike Business Line + Material
+  + Region alone, where one line can span several statuses). For each unique
+  key the app sets three flags — **Status Change**, **Pattern Change**, and
+  **Status and Pattern Change** (`Yes`/`No`) — by comparing the current
+  Arkieva Active Status / Pattern against the prior-cycle
+  (`… Lag 1`) values, and from those flags assigns the key to exactly one
+  bucket (No Changes / Status Change / Pattern Change / Status & Pattern
+  Change). Each key's net STF deviation is then rolled up to Material ×
+  bucket. The per-Material segments reconcile exactly to the Material's net
+  change. Blank/placeholder values (empty, `nan`, `n/a`, …) are normalised
+  so a placeholder-to-placeholder move isn't mistaken for a real change,
+  while genuine states like `Unknown` and `-` are treated as distinct. Only
+  buckets that occur in the data appear — if, in a given file, every changed
+  key happens to change *both* status and pattern together, only *No
+  Changes* and *Status & Pattern Change* show up; the other two populate as
+  soon as status-only or pattern-only moves exist. This relies on the
   export's **Arkieva Active Status Lag 1** and **Arkieva Pattern Lag 1**
   columns; files without them show everything under *No Changes*.
 - Uses the same cascading filters as *Forecast vs Actuals* **minus the

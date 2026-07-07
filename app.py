@@ -1968,11 +1968,97 @@ def _stf_grain_delta(sub: pd.DataFrame) -> pd.DataFrame:
         np.where(status_changed, STF_BUCKET_STATUS,
                  np.where(pattern_changed, STF_BUCKET_PATTERN,
                           STF_BUCKET_NONE)))
+    # Explicit per-unique-key change flags (Yes/No), as required for the
+    # material change-split visual and downstream classification.
+    gd["Status Change"] = np.where(status_changed, "Yes", "No")
+    gd["Pattern Change"] = np.where(pattern_changed, "Yes", "No")
+    gd["Status and Pattern Change"] = np.where(
+        status_changed & pattern_changed, "Yes", "No")
     gd["CurStatus"] = cur_status.values
     gd["LagStatus"] = lag_status.values
     gd["CurPattern"] = cur_pat.values
     gd["LagPattern"] = lag_pat.values
     return gd
+
+
+@st.cache_data(show_spinner=False)
+def compute_stf_material_changes(
+    filtered_df: pd.DataFrame,
+    horizon_months: Tuple[pd.Timestamp, ...],
+    top_n: int = 25,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Top-N Materials by absolute STF deviation, split by change bucket.
+
+    The classification grain — the **unique key** that tracks a forecast line
+    across cycles — is Business Line + Material code + Ship To Sub Region +
+    Arkieva Active Status + Arkieva Pattern (this is the app's ``Key`` plus
+    status + pattern, which is collision-free). For each unique key the net
+    STF deviation over the horizon (Σ current − Σ prior) is computed and the
+    key is flagged/bucketed via ``Status Change`` / ``Pattern Change`` /
+    ``Status and Pattern Change`` → No Changes / Status Change / Pattern
+    Change / Status & Pattern Change.
+
+    Those per-key deviations are then rolled up to **Material × Bucket** so
+    each Material can be drawn as a stacked bar of its change split.
+
+    Returns ``(long_df, wide_df)``:
+      * ``long_df`` — [Material, Bucket, Delta, AbsDelta] for the top-N
+        materials (tidy, for a stacked bar).
+      * ``wide_df`` — one row per Material with a column per bucket's signed
+        delta, the total net delta, total absolute deviation, and each
+        bucket's **% share of the material's gross (absolute) change**.
+    Materials are ranked by total absolute deviation (desc).
+    """
+    long_cols = ["Material", "Bucket", "Delta", "AbsDelta"]
+    if filtered_df.empty or not horizon_months:
+        return pd.DataFrame(columns=long_cols), pd.DataFrame()
+
+    hz = list(horizon_months)
+    sub = filtered_df[
+        filtered_df["Data"].isin([STF_CURRENT_LABEL, STF_LAG1_LABEL])
+        & filtered_df["Date"].isin(hz)
+    ]
+    if sub.empty:
+        return pd.DataFrame(columns=long_cols), pd.DataFrame()
+
+    # Per unique-key delta + bucket (grain already includes status+pattern).
+    gd = _stf_grain_delta(sub)
+    # Attach the Material label for each Key (one Material per Key).
+    mat_map = (sub.drop_duplicates(subset=["Key"])
+               .set_index("Key")["Material"])
+    gd["Material"] = gd["Key"].map(mat_map)
+
+    # Roll up to Material × Bucket.
+    mb = (gd.groupby(["Material", "Bucket"], as_index=False)["Delta"].sum())
+    mb["AbsDelta"] = mb["Delta"].abs()
+
+    # Rank materials by total absolute deviation and keep the top N.
+    mat_abs = (mb.groupby("Material")["AbsDelta"].sum()
+               .sort_values(ascending=False))
+    top_materials = list(mat_abs.head(top_n).index)
+    long_df = mb[mb["Material"].isin(top_materials)].copy()
+    # Order the Material categories by rank for the chart.
+    long_df["Material"] = pd.Categorical(long_df["Material"],
+                                         categories=top_materials, ordered=True)
+    long_df = long_df.sort_values("Material").reset_index(drop=True)
+
+    # Wide view: one row per material, a signed-delta column per bucket.
+    wide = (long_df.pivot_table(index="Material", columns="Bucket",
+                                values="Delta", aggfunc="sum", fill_value=0.0,
+                                observed=False))
+    for b in STF_BUCKET_ORDER:
+        if b not in wide.columns:
+            wide[b] = 0.0
+    wide = wide[[b for b in STF_BUCKET_ORDER]]
+    wide["Net delta"] = wide.sum(axis=1)
+    gross = long_df.groupby("Material", observed=False)["AbsDelta"].sum()
+    wide["Total abs deviation"] = gross
+    for b in STF_BUCKET_ORDER:
+        wide[f"{b} %"] = np.where(
+            wide["Total abs deviation"] != 0,
+            wide[b].abs() / wide["Total abs deviation"] * 100.0, 0.0)
+    wide = wide.reindex(top_materials).reset_index()
+    return long_df, wide
 
 
 @st.cache_data(show_spinner=False)
@@ -2594,126 +2680,84 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             st.plotly_chart(fig_hm, use_container_width=True,
                             config={"displaylogo": False})
 
-    # ---- Waterfall: variation drivers by change bucket ---------------------
-    st.markdown("### 💧 STF variation drivers (waterfall)")
+    # ---- Top 25 Materials by change split ----------------------------------
+    st.markdown("### 🧱 Top 25 Materials — STF change split")
     st.caption(
-        "Decomposes the net STF change (Current − prior committed) into "
-        "**change buckets** based on whether each Key's **Arkieva Active "
-        "Status** and/or **Arkieva Pattern** changed vs the prior cycle: "
-        "**No Changes**, **Status Change**, **Pattern Change**, and "
-        "**Status & Pattern Change**. Rolls up across the current filter "
-        "selection; the bucket deltas reconcile to the net change."
+        "Top 25 Materials by **absolute STF deviation** (Current − prior "
+        "committed) over the horizon, each split into the change buckets "
+        "**No Changes**, **Status Change**, **Pattern Change**, and **Status "
+        "& Pattern Change**. Classification is at the unique-key grain "
+        "(Business Line + Material + Ship To Sub Region + Active Status + "
+        "Pattern), flagged by whether status and/or pattern changed vs the "
+        "prior cycle. Reacts to the filters above."
     )
-    drivers = compute_stf_drivers(filtered, tuple(horizon_months))
+    mat_long, mat_wide = compute_stf_material_changes(
+        filtered, tuple(horizon_months), top_n=25)
 
-    if drivers.empty or drivers["Delta"].abs().sum() == 0:
-        st.info("No driver decomposition available for this selection.")
+    if mat_long.empty:
+        st.info("No material STF deviation available for this selection.")
     else:
-        measures = ["absolute"] + ["relative"] * len(drivers) + ["total"]
-        x_labels = ["Prior committed"] + drivers["Driver"].tolist() + ["Current"]
-        y_vals = [net_lag] + drivers["Delta"].tolist() + [None]
-        fig_wf = go.Figure(go.Waterfall(
-            orientation="v", measure=measures, x=x_labels, y=y_vals,
-            connector=dict(line=dict(color=DARK_MUTED)),
-            increasing=dict(marker=dict(color="#51cf66")),
-            decreasing=dict(marker=dict(color="#ff6b6b")),
-            totals=dict(marker=dict(color=ACCENT)),
-            hovertemplate="%{x}<br>%{y:,.0f} kg<extra></extra>",
-        ))
+        bucket_colors = {
+            STF_BUCKET_NONE: "#1f4e8c",       # deep blue
+            STF_BUCKET_PATTERN: "#51cf66",    # green
+            STF_BUCKET_STATUS: "#22b8cf",     # cyan
+            STF_BUCKET_BOTH: "#ae3ec9",       # purple
+        }
+        # Order materials top→bottom by absolute deviation (largest on top).
+        mat_order = mat_wide["Material"].tolist()
+        fig_mat = go.Figure()
+        for bucket in STF_BUCKET_ORDER:
+            seg = mat_long[mat_long["Bucket"] == bucket]
+            if seg.empty:
+                continue
+            seg = seg.set_index("Material").reindex(mat_order).reset_index()
+            fig_mat.add_trace(go.Bar(
+                y=seg["Material"], x=seg["AbsDelta"].fillna(0),
+                name=bucket, orientation="h",
+                marker=dict(color=bucket_colors[bucket]),
+                customdata=np.stack([seg["Delta"].fillna(0)], axis=-1),
+                hovertemplate=("%{y}<br>" + bucket +
+                               "<br>Abs deviation: %{x:,.0f} kg"
+                               "<br>Net: %{customdata[0]:,.0f} kg<extra></extra>"),
+            ))
         dark_layout(
-            fig_wf, title="STF change decomposition by change bucket",
-            xaxis_title="", yaxis_title="Forecast volume (kg)",
-            height=440, margin=dict(t=60, l=60, r=30, b=110),
-            showlegend=False,
+            fig_mat, title="Top 25 Materials (by absolute STF deviation)",
+            xaxis_title="Absolute STF deviation (kg)", yaxis_title="",
+            height=760,
+            legend=dict(orientation="h", y=1.04, x=0.5, xanchor="center",
+                        bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
+            margin=dict(t=70, l=260, r=30, b=60),
         )
-        st.plotly_chart(fig_wf, use_container_width=True,
+        fig_mat.update_layout(barmode="stack")
+        # Largest at top: reverse the category axis (Plotly puts first at bottom).
+        fig_mat.update_yaxes(autorange="reversed",
+                             categoryorder="array",
+                             categoryarray=list(reversed(mat_order)))
+        st.plotly_chart(fig_mat, use_container_width=True,
                         config={"displaylogo": False})
 
-        dr_show = drivers.copy()
-        total_abs = dr_show["Delta"].abs().sum()
-        dr_show["% of gross change"] = np.where(
-            total_abs != 0, dr_show["Delta"].abs() / total_abs * 100, 0.0)
-        st.dataframe(
-            dr_show.rename(columns={"Driver": "Change bucket"}).style.format(
-                {"Delta": "{:,.0f}", "% of gross change": "{:.1f}%"}),
-            use_container_width=True, hide_index=True,
-        )
-
-        # ---- Drill-down: what drives a change bucket -----------------------
-        st.markdown("#### 🔍 Drill down into a change bucket")
-        st.caption(
-            "Pick a change bucket to see the specific **status / pattern "
-            "transitions** (prior → current) driving its STF change, so you "
-            "can trace the root cause."
-        )
-        # Only offer buckets that represent an actual change and are present.
-        changeable = [b for b in (STF_BUCKET_STATUS, STF_BUCKET_PATTERN,
-                                   STF_BUCKET_BOTH)
-                      if b in set(drivers["Driver"])]
-        if not changeable:
-            st.info("No Keys changed status or pattern vs the prior cycle in "
-                    "this horizon, so there's nothing to drill into "
-                    "(everything sits in **No Changes**).")
-        else:
-            dcol1, dcol2 = st.columns([1.3, 1.0])
-            with dcol1:
-                sel_bucket = st.selectbox(
-                    "Change bucket", changeable, index=0,
-                    key="stf::drill_bucket")
-            # For the combined bucket, let the planner choose which axis to
-            # view the transitions by.
-            axis_bucket = sel_bucket
-            if sel_bucket == STF_BUCKET_BOTH:
-                with dcol2:
-                    axis = st.radio(
-                        "View transitions by", ["Status", "Pattern"],
-                        key="stf::drill_axis", horizontal=True)
-                # Reuse the breakdown fn: STATUS bucket → status axis,
-                # PATTERN bucket → pattern axis. For BOTH, pick accordingly.
-                axis_bucket = (STF_BUCKET_STATUS if axis == "Status"
-                               else STF_BUCKET_PATTERN)
-
-            # compute breakdown: filter keys to the selected change bucket,
-            # group by the chosen transition axis (status/pattern).
-            if sel_bucket == STF_BUCKET_BOTH:
-                bd = compute_stf_driver_breakdown(
-                    filtered, tuple(horizon_months), STF_BUCKET_BOTH,
-                    axis="pattern" if axis_bucket == STF_BUCKET_PATTERN
-                    else "status")
-            else:
-                bd = compute_stf_driver_breakdown(
-                    filtered, tuple(horizon_months), sel_bucket)
-
-            if bd.empty:
-                st.info("No transitions found for this bucket.")
-            else:
-                bd_plot = bd.sort_values("Delta")
-                fig_bd = go.Figure(go.Bar(
-                    x=bd_plot["Delta"].tolist(),
-                    y=bd_plot["Transition"].tolist(),
-                    orientation="h",
-                    marker=dict(color=[("#51cf66" if v >= 0 else "#ff6b6b")
-                                       for v in bd_plot["Delta"]]),
-                    customdata=bd_plot["Keys"].tolist(),
-                    hovertemplate="%{y}<br>%{x:,.0f} kg<br>%{customdata} "
-                                  "Key(s)<extra></extra>",
-                ))
-                dark_layout(
-                    fig_bd,
-                    title=f"{sel_bucket} — transitions driving the STF change",
-                    xaxis_title="STF change (kg)", yaxis_title="",
-                    height=max(300, 34 * len(bd_plot) + 120),
-                    margin=dict(t=60, l=200, r=30, b=50), showlegend=False,
-                )
-                st.plotly_chart(fig_bd, use_container_width=True,
-                                config={"displaylogo": False})
-                st.dataframe(
-                    bd.rename(columns={"Transition": "Transition (prior → current)",
-                                       "Delta": "STF change (kg)",
-                                       "Keys": "# Keys"}).style.format(
-                        {"STF change (kg)": "{:,.0f}"}),
-                    use_container_width=True, hide_index=True,
-                )
+        # ---- Table: absolute (kg) and % split per material -----------------
+        st.markdown("#### Change split by Material (kg and %)")
+        show = mat_wide.copy()
+        abs_cols = [b for b in STF_BUCKET_ORDER]
+        pct_cols = [f"{b} %" for b in STF_BUCKET_ORDER]
+        rename = {}
+        for b in STF_BUCKET_ORDER:
+            rename[b] = f"{b} (kg)"
+        disp = show[["Material"] + abs_cols + ["Net delta",
+                     "Total abs deviation"] + pct_cols].rename(columns=rename)
+        fmt = {f"{b} (kg)": "{:,.0f}" for b in STF_BUCKET_ORDER}
+        fmt["Net delta"] = "{:,.0f}"
+        fmt["Total abs deviation"] = "{:,.0f}"
+        for pc in pct_cols:
+            fmt[pc] = "{:.1f}%"
+        st.dataframe(disp.style.format(fmt), use_container_width=True,
+                     hide_index=True, height=420)
+        st.download_button(
+            "⬇️ Download material change split (CSV)",
+            data=mat_wide.to_csv(index=False),
+            file_name="stf_material_change_split.csv", mime="text/csv",
+            key="stf::dl_materials")
 
 
 # ---------------------------------------------------------------------------
