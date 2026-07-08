@@ -183,13 +183,21 @@ A faithful reproduction of the original Excel pivot dashboard:
 - **Date-range slider** plus an **interactive chart range slider and quick
   range buttons** (6m / 1y / 2y / All) right on the plot.
 - **Highly interactive, presentable line chart**: smooth (spline) **solid**
-  lines for *every* series — both History and Forecast (no more dotted
-  forecast lines); unified hover, spike lines, zoom/pan, and a legend below
-  the chart for maximum plot area.
+  lines for every series; unified hover, spike lines, zoom/pan, and a legend
+  below the chart for maximum plot area.
+- **History lines span the whole timeline; forecast lines are drawn only in
+  the Forecast period.** The two **History** series — *Sales History (kg)*
+  and *History For Forecast (kg)* — run across **both** the History and
+  Forecast bands, so planners can read actual sales, seasonality and
+  outliers continuously. The **Forecast** series — *Statistical Forecast
+  Committed (kg)*, the **prior-cycle committed** line (*… Lag 1/Lag 2*), and
+  *Final Demand Plan Lag 1 (kg)* — appear **only after the boundary** (they
+  are blanked out in the History band), keeping the historical portion of
+  the chart uncluttered.
 - **Clear History vs Forecast highlighting**: a tinted *History* band and
-  *Forecast* band separated by a vertical boundary at the last month of
-  Sales History; the two groups are distinguished by colour family and
-  marker shape.
+  *Forecast* band separated by a vertical boundary at the last active month
+  of Sales History; History and Forecast series are distinguished by colour
+  family and marker shape (circles vs diamonds).
 - **Trend lines** (toggle): a linear trend is fitted separately to the
   history and forecast periods and overlaid, with an **automatic
   interpretation** telling you whether the forecast follows the historical

@@ -336,9 +336,13 @@ STAT_FORECAST_ALIASES = [
     "Statistical Forecast (kg)",
 ]
 
-# Categorisation of the four "Data" series
+# Categorisation of the "Data" series. History lines span the full timeline;
+# Forecast lines are drawn ONLY in the Forecast period (after the last active
+# Sales-History month), so planners can read historical sales/seasonality
+# cleanly in the History band.
 HISTORY_SERIES = ["Sales History (kg)", "History For Forecast (kg)"]
-FORECAST_SERIES = ["Statistical Forecast (kg)", "Final Demand Plan Lag 1 (kg)"]
+FORECAST_SERIES = ["Statistical Forecast (kg)", STF_LAG1_LABEL,
+                   "Final Demand Plan Lag 1 (kg)"]
 
 # Visual style: every series uses a SOLID line (Change 3). History and
 # Forecast are distinguished by colour family and marker, not by dashing.
@@ -346,6 +350,7 @@ SERIES_STYLE = {
     "Sales History (kg)":           {"color": "#4da3ff", "dash": "solid", "category": "History"},
     "History For Forecast (kg)":    {"color": "#36cfc9", "dash": "solid", "category": "History"},
     "Statistical Forecast (kg)":    {"color": "#ffa94d", "dash": "solid", "category": "Forecast"},
+    STF_LAG1_LABEL:                 {"color": "#c084fc", "dash": "solid", "category": "Forecast"},
     "Final Demand Plan Lag 1 (kg)": {"color": "#ff6b6b", "dash": "solid", "category": "Forecast"},
 }
 
@@ -2873,15 +2878,24 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
             )
         fig.add_vline(x=boundary, line=dict(color=DARK_MUTED, width=1, dash="dot"))
 
-    # One trace per Data series — all SOLID (Change 3), distinguished by colour
+    # One trace per Data series — all SOLID (Change 3), distinguished by colour.
+    # History series run across BOTH periods; Forecast series (Statistical
+    # Forecast Committed, its prior-cycle line, Final Demand Plan Lag 1) are
+    # clipped to the Forecast period only (dates after the boundary), so the
+    # History band stays clean for reading actual sales, seasonality and
+    # outliers.
     ordered = [s for s in HISTORY_SERIES + FORECAST_SERIES if s in pivot.columns]
     for col in ordered:
         style = SERIES_STYLE.get(
             col, {"color": "#888", "dash": "solid", "category": "Other"}
         )
+        y_vals = pivot[col]
+        if style["category"] == "Forecast" and boundary is not None:
+            # Hide forecast lines in the History period.
+            y_vals = y_vals.where(pivot.index > boundary)
         fig.add_trace(
             go.Scatter(
-                x=pivot.index, y=pivot[col],
+                x=pivot.index, y=y_vals,
                 name=col, mode="lines+markers",
                 line=dict(color=style["color"], width=2.6, dash="solid",
                           shape="spline", smoothing=0.5),
