@@ -416,6 +416,7 @@ Make a folder containing these files (note the `.streamlit` folder):
 forecast-vs-actuals/
 ├── app.py
 ├── requirements.txt
+├── runtime.txt
 ├── README.md
 └── .streamlit/
     └── config.toml
@@ -437,7 +438,7 @@ Using the command line (with Git installed):
 ```bash
 cd forecast-vs-actuals
 git init
-git add app.py requirements.txt README.md .streamlit/config.toml
+git add app.py requirements.txt runtime.txt README.md .streamlit/config.toml
 git commit -m "Initial commit: Forecast vs Actuals dashboard"
 git branch -M main
 git remote add origin https://github.com/<your-username>/forecast-vs-actuals.git
@@ -482,7 +483,9 @@ Streamlit detects the push and rebuilds within a minute.
 | "Main module does not exist" | The **Main file path** must be `app.py` (case-sensitive). |
 | App sleeps after inactivity | Free-tier apps sleep; the first visit wakes them in ~30 s. |
 | Large uploads rejected | Streamlit's default upload limit is 200 MB; raise it with a `.streamlit/config.toml` containing `[server]\nmaxUploadSize = 500` if needed. |
-| **`Segmentation fault` in the logs, app won't start** | Caused by an incompatible native stack (e.g. numpy 2.4 / pandas 3.0 / pyarrow 25 resolving from open version ranges). `requirements.txt` now **pins** a tested, ABI-compatible set (numpy 1.26 / pandas 2.2 / pyarrow 17 / streamlit 1.50 / plotly 5.24). Keep those pins; if you bump one, re-test locally with a live `streamlit run` before pushing. |
+| **`Segmentation fault` in the logs, app won't start** | Caused by an incompatible native stack (e.g. pandas 3.0 / numpy 2.4 / pyarrow 25 resolving from open version ranges). `requirements.txt` now **pins** a tested, ABI-compatible set (pandas 2.3 / numpy 2.3 / pyarrow 22 / streamlit 1.50 / plotly 5.24). Keep those pins; if you bump one, re-test locally with a live `streamlit run` before pushing. |
+| **`Failed to download and build pyarrow…` / `ModuleNotFoundError: pkg_resources` during install** | The cloud's Python had no prebuilt wheel for a pinned package, so pip tried to compile it from source and failed. This happens when Python is very new (e.g. **3.14**) and a pin predates its wheels. The current pins ship wheels for **Python 3.11–3.14**, so this shouldn't recur. If it does, either (a) set the **Python version to 3.12** in *App → Settings → Advanced* (most reliable), or (b) bump the offending package to a version that has a wheel for the cloud's Python. |
+| **Cloud is on the wrong Python version** | `runtime.txt` (`python-3.12`) requests 3.12, but the **Advanced settings dropdown at deploy time takes precedence** on the current cloud — set it there. The pinned requirements work on 3.12 **and** 3.14 regardless. |
 | `use_container_width will be removed…` warning | This deprecated arg has been replaced throughout with the current `width="stretch"` API, so the warning no longer appears. |
 
 > **Dependency pinning:** the app pins compatible-release (`~=`) versions so
@@ -498,6 +501,7 @@ Streamlit detects the push and rebuilds within a minute.
 .
 ├── app.py                    # Streamlit application
 ├── requirements.txt          # Pinned dependency versions (tested, no segfault)
+├── runtime.txt               # Preferred Python version (3.12) for the cloud
 ├── README.md
 └── .streamlit/
     └── config.toml           # Dark theme + max upload size

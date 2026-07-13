@@ -1,19 +1,24 @@
-# Pinned to a tested, mutually-compatible stack.
+# Pinned to a tested, mutually-compatible stack that ships prebuilt wheels for
+# Python 3.11-3.14 (so no source builds on Streamlit Cloud, whatever Python it
+# selects), and avoids the native crashes seen with other combinations.
 #
-# Why pinned (not open ranges): on Streamlit Community Cloud the previous open
-# ranges resolved to numpy 2.4 / pandas 3.0 / pyarrow 25, a bleeding-edge
-# combination whose native (C/Arrow) layers segfaulted the app at runtime
-# ("Segmentation fault"). These pins lock a stable, known-good set:
-#   * numpy 1.26.x + pandas 2.2.x + pyarrow 17.x  - ABI-compatible, no segfault
-#   * streamlit 1.50.x  - supports the current width="stretch" API
-#     (replacing the deprecated use_container_width)
-#   * plotly 5.24.x, openpyxl 3.1.x  - stable with the above
+# History of what went wrong and why these pins:
+#   1. Open ranges once resolved to pandas 3.0 / numpy 2.4 / pyarrow 25, whose
+#      native layers segfaulted the app at runtime.
+#   2. Pinning to pandas 2.2 / numpy 1.26 / pyarrow 17 fixed the segfault but
+#      those have NO wheels for Python 3.14 (the version the cloud later used),
+#      so they tried to build from source and failed
+#      (ModuleNotFoundError: pkg_resources).
+#   3. This set - pandas 2.3.x / numpy 2.3.x / pyarrow 22.x - has cp311-cp314
+#      wheels AND is stable at runtime (no segfault). It is the sweet spot.
 #
-# Compatible-release (~=) allows patch/minor security fixes while holding the
-# tested major.minor, so builds stay reproducible on the cloud.
+# See runtime.txt, which pins Python to 3.12 as the preferred interpreter;
+# these pins also work if the cloud forces 3.14.
+#
+# Compatible-release (~=) allows patch updates while holding the tested minor.
 streamlit~=1.50.0
-pandas~=2.2.3
-numpy~=1.26.4
-pyarrow~=17.0.0
+pandas~=2.3.3
+numpy~=2.3.5
+pyarrow~=22.0.0
 plotly~=5.24.1
 openpyxl~=3.1.5
