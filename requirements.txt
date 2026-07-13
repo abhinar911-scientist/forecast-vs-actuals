@@ -1,5 +1,19 @@
-streamlit>=1.32,<2.0
-pandas>=2.0,<3.0
-numpy>=1.24,<3.0
-plotly>=5.18,<6.0
-openpyxl>=3.1,<4.0
+# Pinned to a tested, mutually-compatible stack.
+#
+# Why pinned (not open ranges): on Streamlit Community Cloud the previous open
+# ranges resolved to numpy 2.4 / pandas 3.0 / pyarrow 25, a bleeding-edge
+# combination whose native (C/Arrow) layers segfaulted the app at runtime
+# ("Segmentation fault"). These pins lock a stable, known-good set:
+#   * numpy 1.26.x + pandas 2.2.x + pyarrow 17.x  - ABI-compatible, no segfault
+#   * streamlit 1.50.x  - supports the current width="stretch" API
+#     (replacing the deprecated use_container_width)
+#   * plotly 5.24.x, openpyxl 3.1.x  - stable with the above
+#
+# Compatible-release (~=) allows patch/minor security fixes while holding the
+# tested major.minor, so builds stay reproducible on the cloud.
+streamlit~=1.50.0
+pandas~=2.2.3
+numpy~=1.26.4
+pyarrow~=17.0.0
+plotly~=5.24.1
+openpyxl~=3.1.5

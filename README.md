@@ -482,6 +482,13 @@ Streamlit detects the push and rebuilds within a minute.
 | "Main module does not exist" | The **Main file path** must be `app.py` (case-sensitive). |
 | App sleeps after inactivity | Free-tier apps sleep; the first visit wakes them in ~30 s. |
 | Large uploads rejected | Streamlit's default upload limit is 200 MB; raise it with a `.streamlit/config.toml` containing `[server]\nmaxUploadSize = 500` if needed. |
+| **`Segmentation fault` in the logs, app won't start** | Caused by an incompatible native stack (e.g. numpy 2.4 / pandas 3.0 / pyarrow 25 resolving from open version ranges). `requirements.txt` now **pins** a tested, ABI-compatible set (numpy 1.26 / pandas 2.2 / pyarrow 17 / streamlit 1.50 / plotly 5.24). Keep those pins; if you bump one, re-test locally with a live `streamlit run` before pushing. |
+| `use_container_width will be removed…` warning | This deprecated arg has been replaced throughout with the current `width="stretch"` API, so the warning no longer appears. |
+
+> **Dependency pinning:** the app pins compatible-release (`~=`) versions so
+> the cloud reproduces a known-good build instead of resolving to the newest
+> (possibly incompatible) releases. This is what prevents the segmentation
+> fault seen with unpinned ranges.
 
 ---
 
@@ -490,7 +497,7 @@ Streamlit detects the push and rebuilds within a minute.
 ```
 .
 ├── app.py                    # Streamlit application
-├── requirements.txt          # Pinned dependency ranges
+├── requirements.txt          # Pinned dependency versions (tested, no segfault)
 ├── README.md
 └── .streamlit/
     └── config.toml           # Dark theme + max upload size

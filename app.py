@@ -221,7 +221,7 @@ def render_login_screen() -> None:
                                      key="login::password",
                                      autocomplete="current-password")
             submitted = st.form_submit_button("Sign in",
-                                              use_container_width=True)
+                                              width="stretch")
 
         if submitted:
             if verify_credentials(username, password):
@@ -733,7 +733,7 @@ def render_filter_strip(
     spacer, btn_col = st.columns([8, 2])
     with btn_col:
         if st.button("🔄 Reset filters", key=f"{key_prefix}::reset",
-                     use_container_width=True):
+                     width="stretch"):
             for col_name in columns:
                 # Reset restores defaults (empty if none configured).
                 default_vals = default_selections.get(col_name, [])
@@ -2241,7 +2241,7 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
             legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center"),
         )
         fig.update_yaxes(tickformat="")
-        st.plotly_chart(fig, use_container_width=True,
+        st.plotly_chart(fig, width="stretch",
                         config={"displaylogo": False})
     with lcol:
         st.markdown("**Severity by Sub Region (max)**")
@@ -2249,7 +2249,7 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
                       .sort_values(ascending=False).reset_index())
         st.dataframe(
             region_sev.style.format({"Severity": "{:.1f}"}),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
     # ---- Per-region table ---------------------------------------------------
@@ -2272,7 +2272,7 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
             "Fcst %/yr": lambda v: "–" if pd.isna(v) else f"{v:+.1f}%",
             "Seasonal corr": lambda v: "–" if pd.isna(v) else f"{v:+.2f}",
         }, na_rep="–"),
-        use_container_width=True, hide_index=True, height=380,
+        width="stretch", hide_index=True, height=380,
     )
 
     csv = table[display_cols].to_csv(index=False)
@@ -2379,7 +2379,7 @@ def _render_anomaly_drilldown(key: str, filtered_df: pd.DataFrame) -> None:
                     bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
         margin=dict(t=60, l=60, r=30, b=110),
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
 
     # Supporting metrics
     mc1, mc2, mc3 = st.columns(3)
@@ -2606,7 +2606,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
                             bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
                 margin=dict(t=60, l=60, r=30, b=110),
             )
-            st.plotly_chart(fig_cmp, use_container_width=True,
+            st.plotly_chart(fig_cmp, width="stretch",
                             config={"displaylogo": False})
 
     # ---- Top 25 exception Keys ---------------------------------------------
@@ -2642,7 +2642,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             "CurrentSTF": "{:,.0f}", "Lag1STF": "{:,.0f}",
             "STF Variance": "{:+.1f}%", "Absolute STF Variance": "{:.1f}%",
         }).apply(_thr_highlight, subset=["Absolute STF Variance"]),
-        use_container_width=True, hide_index=True, height=380,
+        width="stretch", hide_index=True, height=380,
     )
     csv = top25.to_csv(index=False)
     st.download_button("⬇️ Download top variation Keys (CSV)", data=csv,
@@ -2682,7 +2682,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
                 margin=dict(t=20, l=200, r=30, b=60),
             )
             fig_hm.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig_hm, use_container_width=True,
+            st.plotly_chart(fig_hm, width="stretch",
                             config={"displaylogo": False})
 
     # ---- Top 25 Materials by change split ----------------------------------
@@ -2738,7 +2738,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
         fig_mat.update_yaxes(autorange="reversed",
                              categoryorder="array",
                              categoryarray=list(reversed(mat_order)))
-        st.plotly_chart(fig_mat, use_container_width=True,
+        st.plotly_chart(fig_mat, width="stretch",
                         config={"displaylogo": False})
 
         # ---- Table: absolute (kg) and % split per material -----------------
@@ -2756,7 +2756,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
         fmt["Total abs deviation"] = "{:,.0f}"
         for pc in pct_cols:
             fmt[pc] = "{:.1f}%"
-        st.dataframe(disp.style.format(fmt), use_container_width=True,
+        st.dataframe(disp.style.format(fmt), width="stretch",
                      hide_index=True, height=420)
         st.download_button(
             "⬇️ Download material change split (CSV)",
@@ -2958,7 +2958,7 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
     )
     add_time_controls(fig)
 
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
 
     # ---- Trend interpretation ----------------------------------------------
     if show_trend:
@@ -3136,7 +3136,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
                  ["Original", "Corrected", "Center", "Lower", "Upper"]},
                 na_rep="–",
             ),
-            use_container_width=True,
+            width="stretch",
         )
         buf = io.StringIO()
         outlier_df[cols].to_csv(buf, index=False)
@@ -3254,7 +3254,7 @@ def _render_key_chart(
         margin=dict(t=70, l=60, r=30, b=150),
     )
     add_time_controls(fig)
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
 
     n_out = int(key_df["IsOutlier"].sum())
     if n_out:
@@ -3366,7 +3366,7 @@ def render_seasonality_tab(long_df: pd.DataFrame) -> None:
     # Seasonality x-axis is categorical months — no rangeslider needed.
     fig.update_xaxes(showspikes=True)
     fig.update_yaxes(tickformat=".2f")
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
 
     # ---- Interpretation -----------------------------------------------------
     status, message = interpret_seasonality(analysis)
@@ -3480,7 +3480,7 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
             margin=dict(t=60, l=60, r=30, b=80),
         )
         fig_year.update_yaxes(ticksuffix="%", rangemode="tozero")
-        st.plotly_chart(fig_year, use_container_width=True,
+        st.plotly_chart(fig_year, width="stretch",
                         config={"displaylogo": False})
 
     # ---- By Business Line and by Ship To Sub Region (grouped bars) ----------
@@ -3511,7 +3511,7 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
                 margin=dict(t=60, l=50, r=20, b=110),
             )
             fig_bl.update_yaxes(ticksuffix="%", rangemode="tozero")
-            st.plotly_chart(fig_bl, use_container_width=True,
+            st.plotly_chart(fig_bl, width="stretch",
                             config={"displaylogo": False})
 
     with rcol:
@@ -3539,7 +3539,7 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
                 margin=dict(t=60, l=50, r=20, b=110),
             )
             fig_rg.update_yaxes(ticksuffix="%", rangemode="tozero")
-            st.plotly_chart(fig_rg, use_container_width=True,
+            st.plotly_chart(fig_rg, width="stretch",
                             config={"displaylogo": False})
 
     # ---- Heatmap: Business Line × Year ------------------------------------
@@ -3565,7 +3565,7 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
             yaxis_title="Business Line", height=300,
             margin=dict(t=20, l=120, r=30, b=50),
         )
-        st.plotly_chart(fig_hm, use_container_width=True,
+        st.plotly_chart(fig_hm, width="stretch",
                         config={"displaylogo": False})
 
     # ---- Materials on Statistical Forecast (interactive table) -------------
@@ -3591,7 +3591,7 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
             {c: "{:,.0f}" for c in fmt_cols}, na_rep="–")
         if "% of region forecast" in mat_table.columns:
             styler = styler.format({"% of region forecast": "{:.1f}%"})
-        st.dataframe(styler, use_container_width=True, hide_index=True, height=420)
+        st.dataframe(styler, width="stretch", hide_index=True, height=420)
         csv = mat_table.to_csv(index=False)
         st.download_button(
             "⬇️ Download materials on Statistical Forecast (CSV)",
@@ -3622,7 +3622,7 @@ def main() -> None:
         st.caption(f"👤 Signed in as **{display_name}**")
     with head_r:
         st.write("")  # vertical spacing to align the button with the title
-        if st.button("🚪 Log out", key="auth::logout", use_container_width=True):
+        if st.button("🚪 Log out", key="auth::logout", width="stretch"):
             logout()
 
     if "current_file_id" not in st.session_state:
