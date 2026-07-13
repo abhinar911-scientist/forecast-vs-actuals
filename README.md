@@ -21,25 +21,12 @@ recently uploaded file — no manual preparation needed.
 ### Sign-in screen (authentication)
 - The app is gated behind a **login screen**: nothing (including the file
   uploader) renders until a valid username and password are entered.
-- Seven authorised users are configured. Usernames are case-insensitive;
-  passwords are case-sensitive. Credentials are stored in the code as
-  **SHA-256 hashes only — never plaintext** — and verified with a
-  constant-time comparison (`hmac.compare_digest`).
 - After signing in, the header shows who is signed in and provides a
   **🚪 Log out** button, which clears all session state (filters, data
   cache, upload) and returns to the sign-in screen.
-- The raw password is purged from Streamlit session state immediately
-  after a successful login.
 
-> **Security note for public repositories:** Streamlit Community Cloud's
-> free tier requires a public GitHub repo, which means the hashed
-> credential list in `app.py` is publicly visible. SHA-256 hashes cannot
-> be reversed directly, but short/patterned passwords are vulnerable to
-> guessing. For stronger protection, move the hash table into **Streamlit
-> secrets** (App → Settings → Secrets) and read it via `st.secrets`, or
-> upgrade to a private repo on a paid workspace. Share the actual
-> passwords with your users through a private channel — never commit
-> plaintext passwords or document them in this README.
+
+
 
 ### Dark theme
 - The entire UI uses a **dark theme** — background, filters, dropdown
@@ -301,25 +288,6 @@ required data is always on the **first sheet**. The first sheet must
 contain these identifier columns followed by month/date columns (one
 column per month):
 
-| Raw identifier columns | Date columns |
-|---|---|
-| `Business Line`, `Material`, `Ship To Sub Region`, `Arkieva ABC`, `Arkieva Pattern`, `Arkieva Active Status`, `Arkieva Review Req`, `Data` | `2023-06-01`, `2023-07-01`, …, `2028-05-01` |
-
-The app **derives** two columns automatically and places them at the
-front, so you do not need to prepare them:
-
-- **Material code** — extracted from the `Material` string (the part after
-  the double underscore, e.g. `2-ETHYL HEXANOL BULK__3000924` → `3000924`).
-- **Key** — built as `Business Line_<material code>_Ship To Sub Region`
-  (e.g. `Cleaning__BL02_3000924_North America`).
-
-`Data` should take the values: `Sales History (kg)`,
-`History For Forecast (kg)`, `Statistical Forecast (kg)` *(or
-"Statistical Forecast Committed (kg)", which is auto-normalised)*,
-the prior-cycle committed line *(labelled `Statistical Forecast Committed
-Lag 1 (kg)`, `… Lag 2 (kg)`, etc. — any lag number is auto-normalised to a
-single canonical line used by the STF Variation & Exceptions tab)*, and
-`Final Demand Plan Lag 1 (kg)`.
 
 **Optional prior-cycle attribute columns:** if the export includes
 `Arkieva Active Status Lag 1` and `Arkieva Pattern Lag 1`, the STF
