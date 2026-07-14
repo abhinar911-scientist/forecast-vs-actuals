@@ -228,8 +228,7 @@ def render_login_screen() -> None:
                 st.session_state["authenticated"] = True
                 st.session_state["auth_user"] = username.strip().lower()
                 # Don't keep the raw password in session state.
-                if "login::password" in st.session_state:
-                    del st.session_state["login::password"]
+                st.session_state.pop("login::password", None)
                 st.rerun()
             else:
                 st.error("❌ Invalid username or password. Please try again.")
@@ -2169,11 +2168,17 @@ def compute_stf_driver_breakdown(
 # Reset on file removal
 # ---------------------------------------------------------------------------
 def reset_app_state() -> None:
-    """Clear filter state, date range, and the data cache."""
+    """Clear filter state, date range, and the data cache.
+
+    Uses ``pop(k, None)`` rather than ``del`` so a key that Streamlit has
+    already reaped (e.g. a widget-backed key from the previous run) can't
+    raise ``KeyError``. The key list is snapshotted first so we're not
+    mutating the mapping while iterating it.
+    """
     keys_to_clear = [k for k in list(st.session_state.keys())
                      if "::" in k or k.startswith("flt_")]
     for k in keys_to_clear:
-        del st.session_state[k]
+        st.session_state.pop(k, None)
     load_excel.clear()
 
 
