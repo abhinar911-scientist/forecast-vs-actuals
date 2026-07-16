@@ -372,6 +372,52 @@ HISTORY_TREND_COLOR = "#82c91e"
 FORECAST_TREND_COLOR = "#f783ac"
 
 
+# ---------------------------------------------------------------------------
+# Safe table rendering
+# ---------------------------------------------------------------------------
+# pandas' Styler can only render `pd.options.styler.render.max_elements` cells
+# (262,144 by default). Streamlit raises a StreamlitAPIException past that, and
+# Styler is punishingly slow long before the ceiling. Tables whose size is
+# data-dependent (e.g. every flagged outlier) can blow through it, so those are
+# rendered WITHOUT a Styler: values stay numeric (still sortable) and the
+# formatting is applied by Streamlit's column_config, which is Arrow-based and
+# virtualised, so it handles any row count quickly.
+STYLER_CELL_LIMIT = 150_000  # safety margin below pandas' 262,144 default
+
+
+def _fmt_decimals(spec: str) -> int:
+    """Number of decimals in a format spec like '{:,.2f}' → 2."""
+    m = re.search(r"\.(\d+)f", spec)
+    return int(m.group(1)) if m else 0
+
+
+def render_numeric_table(df: pd.DataFrame, fmt_map: dict, na_rep: str = "–",
+                         **kwargs) -> None:
+    """Render ``df`` with per-column number formatting.
+
+    Small tables use a pandas Styler (identical look to before). Tables above
+    ``STYLER_CELL_LIMIT`` cells skip the Styler and use column_config instead,
+    which avoids Streamlit's Styler cell-limit exception entirely.
+    """
+    if df.size <= STYLER_CELL_LIMIT:
+        st.dataframe(df.style.format(fmt_map, na_rep=na_rep), **kwargs)
+        return
+
+    disp = df.copy()
+    col_cfg = {}
+    for col, spec in fmt_map.items():
+        if col not in disp.columns:
+            continue
+        dec = _fmt_decimals(spec)
+        disp[col] = pd.to_numeric(disp[col], errors="coerce").round(dec)
+        if spec.rstrip().endswith("%"):
+            col_cfg[col] = st.column_config.NumberColumn(col, format=f"%.{dec}f%%")
+        else:
+            # "localized" adds thousands separators, matching '{:,.Nf}'.
+            col_cfg[col] = st.column_config.NumberColumn(col, format="localized")
+    st.dataframe(disp, column_config=col_cfg, **kwargs)
+
+
 def dark_layout(fig: "go.Figure", **overrides) -> "go.Figure":
     """Apply the shared dark-theme layout to a Plotly figure.
 
@@ -3135,12 +3181,14 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         cols = ["Key", "Business Line", "Material", "Ship To Sub Region",
                 "Arkieva ABC", "Arkieva Pattern", "Date", "Original",
                 "Corrected", "Center", "Lower", "Upper"]
-        st.dataframe(
-            outlier_df[cols].style.format(
-                {c: "{:,.2f}" for c in
-                 ["Original", "Corrected", "Center", "Lower", "Upper"]},
-                na_rep="–",
-            ),
+        st.caption(f"**{len(outlier_df):,}** flagged outlier(s) in the current "
+                   "selection. Use the filters above to narrow the list, or "
+                   "download the full set as CSV below.")
+        render_numeric_table(
+            outlier_df[cols],
+            {c: "{:,.2f}" for c in
+             ["Original", "Corrected", "Center", "Lower", "Upper"]},
+            na_rep="–",
             width="stretch",
         )
         buf = io.StringIO()
@@ -3592,11 +3640,11 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
         fmt_cols = [c for c in mat_table.columns
                     if c.startswith("FY ") or c in
                     ("Total forecast (kg)", "Region total forecast (kg)")]
-        styler = mat_table.style.format(
-            {c: "{:,.0f}" for c in fmt_cols}, na_rep="–")
+        fmt_map = {c: "{:,.0f}" for c in fmt_cols}
         if "% of region forecast" in mat_table.columns:
-            styler = styler.format({"% of region forecast": "{:.1f}%"})
-        st.dataframe(styler, width="stretch", hide_index=True, height=420)
+            fmt_map["% of region forecast"] = "{:.1f}%"
+        render_numeric_table(mat_table, fmt_map, na_rep="–",
+                             width="stretch", hide_index=True, height=420)
         csv = mat_table.to_csv(index=False)
         st.download_button(
             "⬇️ Download materials on Statistical Forecast (CSV)",
