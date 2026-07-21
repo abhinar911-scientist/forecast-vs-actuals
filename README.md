@@ -515,14 +515,37 @@ Streamlit detects the push and rebuilds within a minute.
 
 ## How filters cascade
 
-The filters behave like Excel slicers: selecting values in one narrows
-the options in every other, the active filter still shows all values
-consistent with the others, and stale selections are silently pruned
-(earlier filters dominate, in the order Business Line → Arkieva ABC →
-Ship To Sub Region → Material → Arkieva Review Req → Arkieva Active Status
-→ Arkieva Pattern → Data). The 🔄 **Reset filters** button restores the
-defaults (Arkieva Active Status → Active + Sparse) and clears every other
-selection on that tab.
+The filters behave like Excel slicers:
+
+- **Cascading:** selecting values in one filter narrows the options shown in
+  every *other* filter, while the active filter itself still lists all values
+  consistent with the others (a filter never narrows its own options).
+- **Selections persist.** Your choices stay put across reruns, chart
+  interactions, and tab switches — each multiselect owns its state and the app
+  never overwrites a live selection. Values you've picked are always kept in
+  the option list, so nothing is silently dropped when the cascade would
+  otherwise exclude them; clearing a value is always your decision.
+- **Independent per tab.** Each tab keeps its own filter state (via a unique
+  key prefix), so filtering on one tab doesn't disturb another.
+- **Defaults once.** *Arkieva Active Status* defaults to **Active + Sparse**
+  on a tab's first render; afterwards your choices (including clearing it) are
+  respected. The 🔄 **Reset filters** button restores the defaults and clears
+  every other selection on that tab.
+
+## Sessions and multiple users
+
+- **Session longevity.** Signing in sets a session flag that lasts for the
+  life of the browser session; an active user stays signed in well beyond a
+  few hours. Uploading or replacing a file clears only that session's filter
+  selections — **never** the sign-in — so you won't be logged out mid-work.
+- **Concurrent users.** Streamlit gives every browser session its own
+  isolated `session_state`, and the app keeps all per-user state there (all
+  module-level values are read-only), so several people can use the app at
+  once, each on different tabs with different filters, with no cross-user
+  interference. The heavy data reshape is cached per uploaded file
+  (`@st.cache_data`, keyed by file content), so concurrent users sharing the
+  same file reuse one cached copy instead of recomputing — and a file change
+  by one user never evicts another user's cached data.
 
 ---
 

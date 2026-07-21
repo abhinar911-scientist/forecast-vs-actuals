@@ -7,4 +7,23 @@ textColor = "#e6edf3"
 font = "sans serif"
 
 [server]
+# Allow large Arkieva exports.
 maxUploadSize = 500
+# Larger websocket message size for big in-memory frames (MB).
+maxMessageSize = 500
+# Don't auto-rerun on source changes in production; avoids surprise resets.
+runOnSave = false
+# Keep the browser tab connected; do not silently drop idle sessions.
+enableWebsocketCompression = true
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+# Faster reruns; each user's script run stays isolated in its own session.
+fastReruns = true
+
+[client]
+# Show errors inline (helps diagnose, no data leak on Community Cloud since
+# details already go to the app logs).
+showErrorDetails = "full"

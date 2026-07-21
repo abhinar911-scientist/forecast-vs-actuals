@@ -227,6 +227,11 @@ def render_login_screen() -> None:
             if verify_credentials(username, password):
                 st.session_state["authenticated"] = True
                 st.session_state["auth_user"] = username.strip().lower()
+                # Stamp the login time. Streamlit keeps a session alive for as
+                # long as the browser tab holds the websocket, so an active
+                # user stays signed in well beyond a few hours; this timestamp
+                # lets the app show/verify session age if ever needed.
+                st.session_state["login_time"] = datetime.now().isoformat()
                 # Don't keep the raw password in session state.
                 st.session_state.pop("login::password", None)
                 st.rerun()
@@ -655,7 +660,7 @@ def apply_filters(df: pd.DataFrame, selections: dict) -> pd.DataFrame:
     out = df
     for col, sel in selections.items():
         if sel:  # non-empty list ⇒ active filter
-            out = out[out[col].isin(sel)]
+            out = out[out[col].astype(str).isin([str(v) for v in sel])]
     return out
 
 
@@ -665,25 +670,16 @@ def cascading_options(
     current_selections: dict,
 ) -> dict:
     """For each filter column, compute the option universe consistent with
-    the current selections in **all other** filter columns.
+    the current selections in **all other** filter columns (Excel-slicer
+    behaviour: a column's own selection doesn't narrow its own option list).
     """
     options: dict = {}
     for col in columns:
-        other_selections = {c: v for c, v in current_selections.items() if c != col}
+        other_selections = {c: v for c, v in current_selections.items()
+                            if c != col and v}
         narrowed = apply_filters(df, other_selections)
         options[col] = unique_sorted(narrowed[col])
     return options
-
-
-def reconcile_selection(state_key: str, valid_options: List[str]) -> List[str]:
-    """Drop any value from session_state[state_key] that's no longer valid."""
-    current = st.session_state.get(state_key, [])
-    if not isinstance(current, list):
-        current = []
-    cleaned = [v for v in current if v in valid_options]
-    if cleaned != current:
-        st.session_state[state_key] = cleaned
-    return cleaned
 
 
 def render_filter_strip(
@@ -695,82 +691,90 @@ def render_filter_strip(
 ) -> dict:
     """Render a cascading multi-select filter strip above the chart.
 
-    Behavior matches Excel slicers:
-    * Each filter shows only values that are consistent with the
-      selections in the *other* filters.
+    Behaviour matches Excel slicers:
+    * Each filter shows only values consistent with the selections in the
+      *other* filters (a filter never narrows its own options).
     * Selecting values in one filter narrows the options in every other.
-    * Stale selections are silently pruned so the UI never crashes.
+    * Selections persist across reruns and tab switches — the widget owns its
+      state and we never overwrite a live widget key, so nothing resets.
 
-    The pruning is single-pass and proceeds in the declared filter order:
-    earlier filters take precedence over later ones when they conflict.
+    ``default_selections`` maps a column name to values pre-selected on the
+    FIRST render for this ``key_prefix`` (e.g. Arkieva Active Status →
+    Active + Sparse). Applied once; afterwards the user's choices (including
+    clearing) are respected. The 🔄 Reset button restores the defaults.
 
-    ``default_selections`` maps a column name to a list of values that should
-    be pre-selected on the FIRST render for this ``key_prefix`` (e.g. the
-    Arkieva Active Status defaulting to Active + Sparse). The defaults are
-    applied only once; afterwards the user's choices — including clearing a
-    filter — are respected. The 🔄 Reset button restores the defaults.
+    Each tab passes a unique ``key_prefix`` so filter state is independent
+    across tabs (and Streamlit never sees duplicate widget keys).
 
-    Each tab passes a unique ``key_prefix`` so filter state is
-    independent across tabs and Streamlit doesn't see duplicate keys.
+    IMPORTANT (Streamlit state rules): the multiselect's stored value lives at
+    ``st.session_state[f"{key_prefix}::{col}"]``. We must NOT reassign that key
+    on a run where the widget is (re)created, and the ``options`` we pass MUST
+    contain every currently-selected value — otherwise Streamlit silently
+    drops the missing ones, which is exactly what made selections disappear.
+    We therefore (a) seed defaults only before the widget's first creation and
+    (b) union each filter's cascaded options with its own current selection so
+    no live value is ever excluded.
     """
     default_selections = default_selections or {}
 
-    # Apply one-time defaults: only seed a filter's state the very first time
-    # this strip is rendered for this key_prefix (tracked by an init flag).
+    # --- One-time defaults ---------------------------------------------------
+    # Seed a filter's state only the very first time this strip renders for
+    # this key_prefix, and only BEFORE the widget is instantiated (so we're
+    # not mutating a live widget key). Tracked by a per-prefix init flag.
     init_flag = f"{key_prefix}::__initialized__"
     if not st.session_state.get(init_flag, False):
         for col, default_vals in default_selections.items():
             state_key = f"{key_prefix}::{col}"
             if state_key not in st.session_state:
-                # keep only defaults that actually exist in the data
-                valid = [v for v in default_vals if v in set(df[col].astype(str))]
+                valid = [v for v in default_vals
+                         if v in set(df[col].astype(str))]
                 st.session_state[state_key] = valid
         st.session_state[init_flag] = True
 
-    # Step 1: read current selections, dropping any value that doesn't even
-    # exist in the underlying data (defensive against schema changes).
+    # --- Read current selections straight from widget state ------------------
+    # (What the user last chose. Don't rewrite these keys — the widgets own
+    # them.) Values that no longer exist in the data at all are ignored for
+    # option-computation but left in state; Streamlit prunes them harmlessly
+    # once we include current selections in the options union below.
     current_selections: dict = {}
+    all_values = {col: set(df[col].astype(str)) for col in columns}
     for col in columns:
-        state_key = f"{key_prefix}::{col}"
-        current_selections[col] = reconcile_selection(
-            state_key, unique_sorted(df[col])
-        )
+        raw = st.session_state.get(f"{key_prefix}::{col}", [])
+        if not isinstance(raw, list):
+            raw = []
+        # keep only values that still exist somewhere in the data
+        current_selections[col] = [v for v in raw if v in all_values[col]]
 
-    # Step 2: walk filters in declared order. For each filter, compute its
-    # valid options given only the already-pruned EARLIER filters. Drop any
-    # of this filter's values that aren't in those options.
-    for i, col in enumerate(columns):
-        earlier = {c: current_selections[c] for c in columns[:i]}
-        narrowed = apply_filters(df, earlier)
-        valid_here = unique_sorted(narrowed[col])
-
-        state_key = f"{key_prefix}::{col}"
-        before = list(current_selections[col])
-        cleaned = [v for v in before if v in valid_here]
-        if cleaned != before:
-            st.session_state[state_key] = cleaned
-            current_selections[col] = cleaned
-
-    # Step 3: compute the final option set for each filter.
+    # --- Cascade: options for each filter given the OTHER filters ------------
     options_per_col = cascading_options(df, columns, current_selections)
 
-    # Step 4: render the widgets.
+    # --- Render widgets ------------------------------------------------------
     rows = [columns[i:i + n_per_row] for i in range(0, len(columns), n_per_row)]
     selections: dict = {}
     for row in rows:
-        cols = st.columns(len(row))
-        for slot, col_name in zip(cols, row):
-            opts = options_per_col[col_name]
-            full_count = len(unique_sorted(df[col_name]))
+        slots = st.columns(len(row))
+        for slot, col_name in zip(slots, row):
+            cascaded = options_per_col[col_name]
+            selected_now = current_selections[col_name]
+            # Union cascaded options with the current selection so Streamlit
+            # never drops a live value (order: cascaded first, then any
+            # selected value not already present — e.g. one that only the
+            # other filters would exclude).
+            opts = list(cascaded)
+            for v in selected_now:
+                if v not in cascaded:
+                    opts.append(v)
+            full_count = len(all_values[col_name])
             placeholder = (
-                f"All ({len(opts)})"
-                if len(opts) == full_count
-                else f"{len(opts)} of {full_count} (filtered)"
+                f"All ({len(cascaded)})"
+                if len(cascaded) == full_count
+                else f"{len(cascaded)} of {full_count} (filtered)"
             )
             with slot:
                 selections[col_name] = st.multiselect(
                     col_name,
                     options=opts,
+                    default=None,  # value comes from session_state[key]
                     key=f"{key_prefix}::{col_name}",
                     placeholder=placeholder,
                 )
@@ -779,12 +783,12 @@ def render_filter_strip(
     with btn_col:
         if st.button("🔄 Reset filters", key=f"{key_prefix}::reset",
                      width="stretch"):
+            # Clear every filter widget key so the multiselects re-seed from
+            # defaults on the next run, then drop the init flag so defaults
+            # re-apply. Use pop (never raises) and rerun.
             for col_name in columns:
-                # Reset restores defaults (empty if none configured).
-                default_vals = default_selections.get(col_name, [])
-                valid = [v for v in default_vals
-                         if v in set(df[col_name].astype(str))]
-                st.session_state[f"{key_prefix}::{col_name}"] = valid
+                st.session_state.pop(f"{key_prefix}::{col_name}", None)
+            st.session_state.pop(init_flag, None)
             st.rerun()
 
     return selections
@@ -2214,18 +2218,25 @@ def compute_stf_driver_breakdown(
 # Reset on file removal
 # ---------------------------------------------------------------------------
 def reset_app_state() -> None:
-    """Clear filter state, date range, and the data cache.
+    """Clear THIS session's filter state and date range on file change.
 
-    Uses ``pop(k, None)`` rather than ``del`` so a key that Streamlit has
-    already reaped (e.g. a widget-backed key from the previous run) can't
-    raise ``KeyError``. The key list is snapshotted first so we're not
-    mutating the mapping while iterating it.
+    Only per-session widget keys are cleared (filter selections, date ranges,
+    and the per-prefix init flags). We intentionally do NOT call
+    ``load_excel.clear()``: that cache is global and keyed by file content, so
+    clearing it would needlessly evict other concurrent users' data. Different
+    files already map to different cache entries.
+
+    Uses ``pop(k, None)`` rather than ``del`` so a key Streamlit has already
+    reaped can't raise ``KeyError``. Auth keys (``authenticated``,
+    ``auth_user``) and ``current_file_id`` are never touched here.
     """
-    keys_to_clear = [k for k in list(st.session_state.keys())
-                     if "::" in k or k.startswith("flt_")]
+    protected = {"authenticated", "auth_user", "current_file_id", "login_time"}
+    keys_to_clear = [
+        k for k in list(st.session_state.keys())
+        if k not in protected and ("::" in k or k.startswith("flt_"))
+    ]
     for k in keys_to_clear:
         st.session_state.pop(k, None)
-    load_excel.clear()
 
 
 # ---------------------------------------------------------------------------
