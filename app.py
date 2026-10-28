@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import io
 import re
 from datetime import datetime
@@ -21,6 +22,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -35,126 +37,136 @@ st.set_page_config(
 
 
 def inject_dark_theme_css() -> None:
-    """Force a dark theme for all UI elements (Change 1).
+    """Page styling that the theme in .streamlit/config.toml can't express.
 
-    A ``.streamlit/config.toml`` already sets the base dark theme; this CSS
-    guarantees consistent dark styling for widgets that the config alone
-    doesn't fully cover (multiselects, dropdown menus, the file uploader,
-    text inputs, tabs) and keeps text high-contrast/legible.
+    Colours, fonts, radii and widget borders come from the config theme; this
+    only adds the app header, panel titles, tab bar, metric cards, button
+    hierarchy and callout tones. Selectors target Streamlit's stable
+    data-testid hooks, never generic tags.
     """
     st.markdown(
         """
         <style>
-        /* ---- App background ---- */
-        .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
-            background-color: #0e1117;
-            color: #e6edf3;
+        :root {
+          --fva-plane: #0f141b; --fva-surface: #161c25; --fva-raised: #1a212b;
+          --fva-line: #2a3441; --fva-ink: #e6ebf1; --fva-ink-2: #a7b1bd;
+          --fva-ink-3: #7c8794; --fva-accent: #4c9be8;
+          --fva-forecast: #d95926;
         }
-        [data-testid="stHeader"] { background: rgba(0,0,0,0); }
+        [data-testid="stMainBlockContainer"] {
+          padding-top: 2.25rem; padding-bottom: 4rem; max-width: 1480px;
+        }
+        [data-testid="stHeader"] { background: transparent; }
 
-        /* ---- Generic text ---- */
-        .stApp, .stMarkdown, label, p, span, div,
-        h1, h2, h3, h4, h5, h6 { color: #e6edf3; }
-        .stCaption, [data-testid="stCaptionContainer"] { color: #9aa4b2 !important; }
+        /* Numbers line up in tables, metrics and captions. */
+        [data-testid="stMetricValue"], [data-testid="stDataFrame"],
+        .fva-cycle { font-variant-numeric: tabular-nums; }
 
-        /* ---- Bordered containers / cards ---- */
-        [data-testid="stContainer"], div[data-testid="stVerticalBlockBorderWrapper"] {
-            background-color: #141925;
-            border-color: #2a3040 !important;
+        /* ---- App header ---------------------------------------------- */
+        .fva-header-title {
+          font-size: 1.6rem; font-weight: 600; letter-spacing: -0.01em;
+          color: var(--fva-ink); line-height: 1.2; margin: 0;
         }
+        .fva-header-sub { color: var(--fva-ink-2); font-size: 0.875rem;
+          margin-top: 0.25rem; }
+        .fva-cycle { display: flex; flex-wrap: wrap; gap: 0; margin-top: 0.9rem;
+          border: 1px solid var(--fva-line); border-radius: 0.375rem;
+          width: fit-content; overflow: hidden; }
+        .fva-cycle > div { padding: 0.45rem 0.9rem; border-right: 1px solid var(--fva-line);
+          background: var(--fva-surface); }
+        .fva-cycle > div:last-child { border-right: none; }
+        .fva-cycle .lbl { display: block; color: var(--fva-ink-3); font-size: 0.72rem; }
+        .fva-cycle .val { display: block; color: var(--fva-ink); font-size: 0.95rem;
+          font-weight: 500; }
+        .fva-cycle .fcst .val { color: #f0875a; }
 
-        /* ---- Inputs: text, multiselect, selectbox, slider ---- */
-        [data-baseweb="input"], [data-baseweb="select"] > div,
-        [data-baseweb="base-input"], .stTextInput input, .stNumberInput input {
-            background-color: #1a1f2b !important;
-            color: #e6edf3 !important;
-            border-color: #2a3040 !important;
-        }
-        /* Multiselect selected "tags" */
-        [data-baseweb="tag"] {
-            background-color: #2d4b7a !important;
-            color: #ffffff !important;
-        }
-        /* Dropdown popover menu */
-        [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
-            background-color: #1a1f2b !important;
-            color: #e6edf3 !important;
-        }
-        [role="option"] { color: #e6edf3 !important; }
-        [role="option"]:hover { background-color: #2a3040 !important; }
+        /* ---- Tabs ---------------------------------------------------- */
+        .stTabs [data-baseweb="tab-list"] { gap: 1.75rem;
+          border-bottom: 1px solid var(--fva-line); }
+        .stTabs [data-baseweb="tab"] { padding: 0.65rem 0 0.7rem 0;
+          color: var(--fva-ink-3); font-weight: 500; font-size: 0.95rem; }
+        .stTabs [data-baseweb="tab"]:hover { color: var(--fva-ink); }
+        .stTabs [aria-selected="true"] { color: var(--fva-ink) !important; }
+        .stTabs [data-baseweb="tab-highlight"] { background-color: var(--fva-accent);
+          height: 2px; }
+        .stTabs [data-baseweb="tab-border"] { display: none; }
+        .stTabs [data-baseweb="tab-panel"] { padding-top: 1.5rem; }
 
-        /* ---- File uploader ---- */
-        [data-testid="stFileUploader"] section,
-        [data-testid="stFileUploaderDropzone"] {
-            background-color: #1a1f2b !important;
-            border: 1px dashed #3a4255 !important;
-            color: #e6edf3 !important;
-        }
-        [data-testid="stFileUploader"] * { color: #e6edf3 !important; }
-        [data-testid="stFileUploader"] button {
-            background-color: #2d4b7a !important;
-            color: #ffffff !important;
-            border: none !important;
-        }
+        /* ---- Section rhythm ------------------------------------------- */
+        [data-testid="stHeading"] h3 { margin-top: 1.25rem; }
+        [data-testid="stHeading"] h4 { margin-top: 0.5rem; color: var(--fva-ink); }
+        .fva-tab-intro { color: var(--fva-ink-2); font-size: 0.925rem;
+          max-width: 78ch; margin: -0.35rem 0 1rem 0; line-height: 1.5; }
 
-        /* ---- Buttons / download buttons ---- */
-        .stButton button, .stDownloadButton button, .stFormSubmitButton button {
-            background-color: #2d4b7a !important;
-            color: #ffffff !important;
-            border: 1px solid #3a5a8a !important;
-        }
-        .stButton button:hover, .stDownloadButton button:hover {
-            background-color: #3a5a8a !important;
-            border-color: #4da3ff !important;
-        }
+        /* ---- Filters panel --------------------------------------------- */
+        [class*="__filter_panel"] { background: var(--fva-surface); }
+        .fva-panel-title { color: var(--fva-ink); font-weight: 600;
+          font-size: 0.95rem; }
+        .fva-panel-note { color: var(--fva-ink-3); font-size: 0.8rem;
+          margin-bottom: 0.25rem; }
+        [data-testid="stMultiSelect"] label p { color: var(--fva-ink-2);
+          font-size: 0.8rem; }
+        [data-baseweb="select"] [data-baseweb="tag"] {
+          background-color: #22364f !important; border: 1px solid #2f4d70; }
+        [data-baseweb="select"] [data-baseweb="tag"] span { color: #dce9f7; }
+        /* Placeholder ("All 12", "4 of 12 available") stays readable. */
+        [data-baseweb="select"] [aria-hidden="true"] + div input::placeholder,
+        [data-baseweb="select"] div[class*="placeholder"] {
+          color: var(--fva-ink-3) !important; opacity: 1; }
 
-        /* ---- Tabs ---- */
-        .stTabs [data-baseweb="tab-list"] { border-bottom-color: #2a3040; }
-        .stTabs [data-baseweb="tab"] { color: #9aa4b2; }
-        .stTabs [aria-selected="true"] { color: #4da3ff !important; }
+        /* ---- Key line + reason chips (anomaly drill-down) --------------- */
+        .fva-keyline { display: flex; flex-wrap: wrap; align-items: center;
+          gap: 0.5rem; margin: 0.25rem 0 0.5rem 0; }
+        .fva-key { font-weight: 600; color: var(--fva-ink); margin-right: 0.25rem; }
+        .fva-sev { color: var(--fva-ink-2); font-size: 0.85rem;
+          padding-right: 0.5rem; border-right: 1px solid var(--fva-line); }
+        .fva-chip { font-size: 0.78rem; color: #dce9f7; background: #22364f;
+          border: 1px solid #2f4d70; border-radius: 999px; padding: 0.1rem 0.6rem; }
 
-        /* ---- Radio / checkbox labels ---- */
-        .stRadio label, .stCheckbox label { color: #e6edf3 !important; }
-
-        /* ---- Metric cards ---- */
+        /* ---- Metric cards ---------------------------------------------- */
         [data-testid="stMetric"] {
-            background-color: #1a1f2b;
-            border: 1px solid #2a3040;
-            border-radius: 8px;
-            padding: 12px 14px;
-        }
-        [data-testid="stMetricValue"] { color: #e6edf3 !important; }
-        [data-testid="stMetricLabel"] { color: #9aa4b2 !important; }
+          background: var(--fva-surface); border: 1px solid var(--fva-line);
+          border-radius: 0.375rem; padding: 0.8rem 1rem 0.85rem 1rem; }
+        [data-testid="stMetricLabel"] p { color: var(--fva-ink-2);
+          font-size: 0.8rem; }
+        [data-testid="stMetricValue"] { font-size: 1.6rem; font-weight: 500;
+          color: var(--fva-ink); }
 
-        /* ---- Dataframe ---- */
-        [data-testid="stDataFrame"] { background-color: #1a1f2b; }
+        /* ---- Buttons: secondary actions are quiet ----------------------- */
+        .stButton button, .stDownloadButton button {
+          background: var(--fva-raised); border: 1px solid var(--fva-line);
+          color: var(--fva-ink); font-weight: 500; }
+        .stButton button:hover, .stDownloadButton button:hover {
+          border-color: var(--fva-accent); color: #ffffff; }
+        .stButton button:focus-visible, .stDownloadButton button:focus-visible {
+          outline: 2px solid var(--fva-accent); outline-offset: 2px; }
+        .stFormSubmitButton button { background: var(--fva-accent);
+          border: 1px solid var(--fva-accent); color: #08111c; font-weight: 600; }
 
-        /* ---- Fullscreen chart overlay ----
-           When a chart is expanded with the "Fullscreen" button, Streamlit
-           renders it inside an overlay container that defaults to white.
-           Force that overlay (and its wrapper) to the dark background so the
-           chart keeps the same dark theme as the embedded view. */
-        [data-testid="stFullScreenFrame"] > div,
-        [data-testid="stFullScreenFrame"],
-        div[data-testid="stFullScreenFrame"] iframe,
-        .element-container:fullscreen,
-        [data-testid="stFullScreenFrame"]:fullscreen,
-        [data-testid="stFullScreenFrame"] > div:fullscreen {
-            background-color: #0e1117 !important;
+        /* ---- Callouts (interpretations) --------------------------------- */
+        [data-testid="stAlert"] { border-radius: 0.375rem; }
+        [data-testid="stAlertContainer"] { border: 1px solid var(--fva-line); }
+
+        /* ---- Expanders and uploader ------------------------------------- */
+        [data-testid="stExpander"] details { background: var(--fva-surface);
+          border-color: var(--fva-line); }
+        [data-testid="stFileUploaderDropzone"] { background: var(--fva-surface);
+          border: 1px dashed #3a4656; }
+
+        /* ---- Small screens --------------------------------------------- */
+        @media (max-width: 760px) {
+          .stTabs [data-baseweb="tab-list"] { gap: 1rem; overflow-x: auto; }
+          .fva-header-title { font-size: 1.3rem; }
         }
-        /* The vendored fullscreen wrapper used by st.plotly_chart */
-        :fullscreen, ::backdrop {
-            background-color: #0e1117 !important;
-        }
-        [data-testid="stFullScreenFrame"] [data-testid="stPlotlyChart"],
-        [data-testid="stFullScreenFrame"] .js-plotly-plot,
-        [data-testid="stFullScreenFrame"] .plot-container {
-            background-color: #0e1117 !important;
-        }
+
+        /* ---- Fullscreen charts keep the dark canvas --------------------- */
+        [data-testid="stFullScreenFrame"], :fullscreen, ::backdrop {
+          background-color: var(--fva-plane) !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 # ---------------------------------------------------------------------------
 # Authentication
@@ -208,12 +220,15 @@ def verify_credentials(username: str, password: str) -> bool:
 def render_login_screen() -> None:
     """Render the login form. Sets st.session_state['authenticated'] on success."""
     inject_dark_theme_css()
-    st.title("🔐 Forecast vs Actuals — Sign in")
-    st.caption("Please sign in to access the dashboard.")
-
-    # Center the form in a narrower column for a cleaner look.
-    _, mid, _ = st.columns([1, 1.2, 1])
+    _, mid, _ = st.columns([1, 1.1, 1])
     with mid:
+        st.markdown(
+            '<div style="height:12vh"></div>'
+            '<div class="fva-header-title">Forecast vs Actuals</div>'
+            '<div class="fva-header-sub">Demand planning review. '
+            'Sign in with your team account.</div>'
+            '<div style="height:1rem"></div>',
+            unsafe_allow_html=True)
         with st.form("login_form", clear_on_submit=False):
             username = st.text_input("Username", key="login::username",
                                      autocomplete="username")
@@ -236,7 +251,7 @@ def render_login_screen() -> None:
                 st.session_state.pop("login::password", None)
                 st.rerun()
             else:
-                st.error("❌ Invalid username or password. Please try again.")
+                st.error("That username and password don't match. Check both and try again.")
 
     st.stop()
 
@@ -331,6 +346,9 @@ STF_LAG1_LABEL = "Statistical Forecast Committed Lag (kg)"
 # Regex matching any committed-lag variant, e.g. "Statistical Forecast
 # Committed Lag 1 (kg)", "... Lag 2 (kg)", "... Lag 3 (kg)".
 STF_LAG_PATTERN = r"^Statistical Forecast Committed Lag\s*\d+\s*\(kg\)$"
+# Minimum prior-cycle volume (kg, summed over the horizon or month) for a
+# % variance to be meaningful.
+STF_MIN_BASE_KG = 1.0
 
 # Some input files label the statistical-forecast line as
 # "Statistical Forecast Committed (kg)". Any of these aliases is normalised
@@ -344,37 +362,130 @@ STAT_FORECAST_ALIASES = [
 # Forecast lines are drawn ONLY in the Forecast period (after the last active
 # Sales-History month), so planners can read historical sales/seasonality
 # cleanly in the History band.
-HISTORY_SERIES = ["Sales History (kg)", "History For Forecast (kg)"]
+# Order = drawing order: actual Sales History is drawn last of the two,
+# so it sits on top of the (usually identical) History For Forecast line.
+HISTORY_SERIES = ["History For Forecast (kg)", "Sales History (kg)"]
 FORECAST_SERIES = ["Statistical Forecast (kg)", STF_LAG1_LABEL,
                    "Final Demand Plan Lag 1 (kg)"]
 
-# Visual style: every series uses a SOLID line (Change 3). History and
-# Forecast are distinguished by colour family and marker, not by dashing.
+# ---------------------------------------------------------------------------
+# Design tokens (mirror .streamlit/config.toml)
+# ---------------------------------------------------------------------------
+# A calm "ink-slate" dark theme built for long review sessions and screen
+# sharing: one steel-blue accent for interactive state, recessive chart
+# chrome, and series colours that mean the same thing on every tab.
+INK_PLANE = "#0f141b"       # page + chart background
+INK_SURFACE = "#161c25"     # panels, hover labels
+INK_RAISED = "#1a212b"      # inputs, buttons
+INK_LINE = "#2a3441"        # hairlines and borders
+INK_GRID = "#1e2631"        # chart gridlines (deliberately quiet)
+TEXT_PRIMARY = "#e6ebf1"
+TEXT_SECONDARY = "#a7b1bd"
+TEXT_MUTED = "#7c8794"
+ACCENT = "#4c9be8"
+FONT_FAMILY = '"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif'
+
+# Names kept for the tab code that predates the token names.
+DARK_BG = INK_PLANE
+DARK_PANEL = INK_SURFACE
+DARK_GRID = INK_GRID
+DARK_TEXT = TEXT_PRIMARY
+DARK_MUTED = TEXT_MUTED
+
+# Categorical order, validated against INK_PLANE with the dataviz palette
+# validator: every adjacent pair clears the colour-blind (ΔE ≥ 8) and
+# normal-vision (ΔE ≥ 15) separation floors, and every colour clears 3:1
+# contrast. Colours are assigned in this fixed order, never cycled.
+CATEGORICAL = ["#3987e5", "#d95926", "#199e70", "#c98500",
+               "#d55181", "#008300", "#9085e9", "#e66767"]
+# Sequential (magnitude): one blue hue, dark → light on the dark plane.
+SEQUENTIAL_BLUE = [[0.0, "#17283d"], [0.25, "#184f95"], [0.5, "#2a78d6"],
+                   [0.75, "#5598e7"], [1.0, "#9ec5f4"]]
+# Diverging (signed change): blue = lower, red = higher, neutral midpoint.
+DIVERGING_BLUE_RED = [[0.0, "#2a78d6"], [0.5, "#273140"], [1.0, "#e66767"]]
+
+# Series colours follow the series on every chart. History vs Forecast is
+# also told apart by marker shape (circles vs diamonds), never colour alone.
 SERIES_STYLE = {
-    "Sales History (kg)":           {"color": "#4da3ff", "dash": "solid", "category": "History"},
-    "History For Forecast (kg)":    {"color": "#36cfc9", "dash": "solid", "category": "History"},
-    "Statistical Forecast (kg)":    {"color": "#ffa94d", "dash": "solid", "category": "Forecast"},
-    STF_LAG1_LABEL:                 {"color": "#c084fc", "dash": "solid", "category": "Forecast"},
-    "Final Demand Plan Lag 1 (kg)": {"color": "#ff6b6b", "dash": "solid", "category": "Forecast"},
+    "Sales History (kg)":           {"color": "#3987e5", "dash": "solid", "category": "History"},
+    "History For Forecast (kg)":    {"color": "#199e70", "dash": "solid", "category": "History"},
+    "Statistical Forecast (kg)":    {"color": "#d95926", "dash": "solid", "category": "Forecast"},
+    STF_LAG1_LABEL:                 {"color": "#9085e9", "dash": "solid", "category": "Forecast"},
+    "Final Demand Plan Lag 1 (kg)": {"color": "#d55181", "dash": "solid", "category": "Forecast"},
 }
 
-# ---------------------------------------------------------------------------
-# Dark theme palette (Change 1)
-# ---------------------------------------------------------------------------
-DARK_BG = "#0e1117"           # page background
-DARK_PANEL = "#1a1f2b"        # cards / panels
-DARK_GRID = "#2a3040"         # chart gridlines
-DARK_TEXT = "#e6edf3"         # primary text (high contrast on dark)
-DARK_MUTED = "#9aa4b2"        # secondary/muted text
-ACCENT = "#4da3ff"            # primary accent
+# Only the forecast period gets a wash; history sits on the plain plane.
+HISTORY_BAND_COLOR = "rgba(0, 0, 0, 0)"
+FORECAST_BAND_COLOR = "rgba(217, 89, 38, 0.06)"
 
-# History / Forecast background bands (tuned for a dark canvas)
-HISTORY_BAND_COLOR = "rgba(77, 163, 255, 0.10)"
-FORECAST_BAND_COLOR = "rgba(255, 169, 77, 0.10)"
+# A trend line wears the colour of the series it is fitted to (dashed).
+HISTORY_TREND_COLOR = SERIES_STYLE["Sales History (kg)"]["color"]
+FORECAST_TREND_COLOR = SERIES_STYLE["Statistical Forecast (kg)"]["color"]
 
-# Trend-line colours (Change 4)
-HISTORY_TREND_COLOR = "#82c91e"
-FORECAST_TREND_COLOR = "#f783ac"
+# STF change buckets: a neutral grey for "no change" so real changes stand
+# out; the three change colours validate on every pair (stacked bars).
+# Cleansed (corrected) history in the Outliers tab: categorical slot 4.
+CLEANSED_COLOR = "#c98500"
+
+CHANGE_BUCKET_COLORS = {
+    "No Changes": "#6b6c70",
+    "Status Change": "#3987e5",
+    "Pattern Change": "#199e70",
+    "Status & Pattern Change": "#d95926",
+}
+
+# Plotly template registered once at import (cheaper than restyling every
+# figure on every rerun, and keeps all charts consistent).
+pio.templates["fva_dark"] = go.layout.Template(
+    layout=dict(
+        font=dict(family=FONT_FAMILY, size=12, color=TEXT_SECONDARY),
+        paper_bgcolor=INK_PLANE,
+        plot_bgcolor=INK_PLANE,
+        colorway=CATEGORICAL,
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=INK_SURFACE, bordercolor=INK_LINE,
+                        font=dict(family=FONT_FAMILY, size=12,
+                                  color=TEXT_PRIMARY)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=12, color=TEXT_SECONDARY),
+                    title=dict(font=dict(size=12, color=TEXT_MUTED)),
+                    itemclick="toggle", itemdoubleclick="toggleothers"),
+        xaxis=dict(showgrid=False, zeroline=False, showline=True,
+                   linecolor=INK_LINE, ticks="outside", ticklen=4,
+                   tickcolor=INK_LINE, tickfont=dict(color=TEXT_MUTED),
+                   title=dict(font=dict(size=12, color=TEXT_MUTED),
+                              standoff=10),
+                   showspikes=True, spikemode="across", spikesnap="cursor",
+                   spikethickness=1, spikecolor=TEXT_MUTED,
+                   spikedash="solid"),
+        yaxis=dict(showgrid=True, gridcolor=INK_GRID, gridwidth=1,
+                   zeroline=False, showline=False, ticks="",
+                   tickfont=dict(color=TEXT_MUTED),
+                   title=dict(font=dict(size=12, color=TEXT_MUTED),
+                              standoff=8)),
+        bargap=0.3,
+        bargroupgap=0.08,
+        margin=dict(t=56, l=64, r=24, b=48),
+        colorscale=dict(sequential=SEQUENTIAL_BLUE,
+                        diverging=DIVERGING_BLUE_RED),
+        annotationdefaults=dict(font=dict(color=TEXT_SECONDARY, size=11)),
+    ),
+    data=dict(
+        scatter=[go.Scatter(line=dict(width=2), marker=dict(size=6))],
+        bar=[go.Bar(marker=dict(line=dict(width=0)))],
+        heatmap=[go.Heatmap(colorscale=SEQUENTIAL_BLUE, xgap=2, ygap=2,
+                            colorbar=dict(outlinewidth=0, thickness=10,
+                                          tickfont=dict(color=TEXT_MUTED)))],
+    ),
+)
+
+PLOTLY_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    "toImageButtonOptions": {"format": "png", "scale": 2},
+}
+_PLOTLY_ACCEPTS_WIDTH = "width" in inspect.signature(st.plotly_chart).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -423,65 +534,198 @@ def render_numeric_table(df: pd.DataFrame, fmt_map: dict, na_rep: str = "–",
     st.dataframe(disp, column_config=col_cfg, **kwargs)
 
 
-def dark_layout(fig: "go.Figure", **overrides) -> "go.Figure":
-    """Apply the shared dark-theme layout to a Plotly figure.
+_LEGEND_STYLE_KEYS = {"traceorder", "groupclick", "title", "tracegroupgap",
+                      "itemsizing"}
 
-    Keeps text light and legible on the dark canvas, adds an interactive
-    range slider + range-selector buttons, unified hover and spike lines.
-    Any keyword overrides are merged into update_layout.
+
+def dark_layout(fig: "go.Figure", **overrides) -> "go.Figure":
+    """Apply the shared chart style (the ``fva_dark`` template).
+
+    Section headers in the page already name each chart, so the in-chart
+    title is not drawn; it is kept as the PNG export file name instead.
+    Legends always sit top-left above the plot, so callers may only adjust
+    legend *grouping*, not its position or colours.
     """
-    base = dict(
-        template="plotly_dark",
-        # Solid dark backgrounds (not transparent): a transparent paper/plot
-        # background lets Streamlit's white fullscreen overlay show through
-        # when the chart is expanded. Using the app's dark colour keeps the
-        # chart dark in BOTH the embedded and fullscreen views, while still
-        # blending seamlessly with the dark page background.
-        paper_bgcolor=DARK_BG,
-        plot_bgcolor=DARK_BG,
-        font=dict(color=DARK_TEXT, size=13),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor=DARK_PANEL, font_size=12,
-                        font_color=DARK_TEXT, bordercolor=DARK_GRID),
-        legend=dict(
-            orientation="h", yanchor="top", y=-0.32,
-            xanchor="center", x=0.5,
-            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT),
-        ),
-        margin=dict(t=70, l=60, r=30, b=120),
-    )
+    title = overrides.pop("title", None)
+    if isinstance(title, dict):
+        title = title.get("text")
+    legend = overrides.pop("legend", None) or {}
+    margin = dict(overrides.pop("margin", None) or {})
+    # Bottom margins were sized for the old under-the-chart legend.
+    margin["t"] = max(margin.get("t", 56), 56)
+    margin["b"] = min(margin.get("b", 48), 64)
+    has_cycle_marks = any(str(a.text or "").startswith("Last actual")
+                          for a in (fig.layout.annotations or ()))
+    if has_cycle_marks:
+        # Boundary labels sit above the plot: lift the legend over them.
+        margin["t"] = max(margin["t"], 84)
+        legend = dict(legend, y=1.09)
+    # Backgrounds are set explicitly as well as in the template: Streamlit's
+    # frontend fills in its own plot background when only a template sets it.
+    base = dict(template="fva_dark", margin=margin,
+                paper_bgcolor=INK_PLANE, plot_bgcolor=INK_PLANE,
+                title=dict(text=None),
+                meta={"export_name": str(title or "chart")})
+    if legend:
+        base["legend"] = {k: v for k, v in legend.items()
+                          if k in _LEGEND_STYLE_KEYS or k == "y"}
     base.update(overrides)
     fig.update_layout(**base)
-    fig.update_xaxes(
-        showgrid=True, gridcolor=DARK_GRID, zeroline=False,
-        showspikes=True, spikemode="across", spikethickness=1,
-        spikecolor=DARK_MUTED, color=DARK_TEXT,
-    )
-    fig.update_yaxes(
-        showgrid=True, gridcolor=DARK_GRID, zeroline=False,
-        color=DARK_TEXT, tickformat=",.0f",
-    )
     return fig
 
 
 def add_time_controls(fig: "go.Figure") -> "go.Figure":
-    """Add an interactive range slider + quick range-selector buttons."""
+    """Add a slim range slider and quick range buttons to a time chart."""
     fig.update_xaxes(
-        rangeslider=dict(visible=True, thickness=0.06,
-                         bgcolor=DARK_PANEL),
+        rangeslider=dict(visible=True, thickness=0.05, bgcolor=INK_SURFACE,
+                         bordercolor=INK_LINE, borderwidth=1),
         rangeselector=dict(
-            bgcolor=DARK_PANEL, activecolor=ACCENT,
-            font=dict(color=DARK_TEXT),
+            x=1, xanchor="right", y=1.02, yanchor="bottom",
+            bgcolor=INK_RAISED, activecolor="#24476e",
+            bordercolor=INK_LINE, borderwidth=1,
+            font=dict(color=TEXT_SECONDARY, size=11),
             buttons=[
-                dict(count=6, label="6m", step="month", stepmode="backward"),
-                dict(count=1, label="1y", step="year", stepmode="backward"),
-                dict(count=2, label="2y", step="year", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(count=2, label="2Y", step="year", stepmode="backward"),
                 dict(step="all", label="All"),
             ],
         ),
         tickformat="%b %Y",
     )
     return fig
+
+
+def show_chart(fig: "go.Figure", key: Optional[str] = None) -> None:
+    """Render a Plotly figure with the app's own template.
+
+    ``theme=None`` stops Streamlit from overriding the template (that
+    override is what made chart titles render as faint grey), and the
+    sizing argument is chosen for the installed Streamlit version, so no
+    deprecation banner is shown in the app.
+    """
+    config = dict(PLOTLY_CONFIG)
+    name = (fig.layout.meta or {}).get("export_name", "chart") \
+        if isinstance(fig.layout.meta, dict) else "chart"
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", str(name)).strip("_")[:60] or "chart"
+    config["toImageButtonOptions"] = dict(config["toImageButtonOptions"],
+                                          filename=safe)
+    kwargs = dict(theme=None, config=config, key=key)
+    if _PLOTLY_ACCEPTS_WIDTH:
+        kwargs["width"] = "stretch"
+    st.plotly_chart(fig, **kwargs)
+
+
+# Display names for the Data lines (the canonical prior-cycle label is an
+# internal normalisation, so planners see what it actually is).
+SERIES_DISPLAY_NAME = {
+    STF_LAG1_LABEL: "Statistical Forecast, prior cycle (kg)",
+}
+# Legend order (independent of drawing order).
+SERIES_RANK = {SALES_HISTORY_LABEL: 1, HISTORY_FOR_FORECAST_LABEL: 2,
+               STAT_FORECAST_LABEL: 3, STF_LAG1_LABEL: 4,
+               "Final Demand Plan Lag 1 (kg)": 5}
+
+
+def format_kg(value: float) -> str:
+    """Compact kg figure for cards: 245.6 M kg, 5.64 bn kg, 12.3 k kg."""
+    if value is None or pd.isna(value):
+        return "–"
+    v = float(value)
+    a = abs(v)
+    if a >= 1e9:
+        return f"{v / 1e9:,.2f} bn kg"
+    if a >= 1e6:
+        return f"{v / 1e6:,.1f} M kg"
+    if a >= 1e4:
+        return f"{v / 1e3:,.1f} k kg"
+    return f"{v:,.0f} kg"
+
+
+def entity_colors(df: pd.DataFrame, column: str) -> dict:
+    """Fixed colour per value of ``column`` across the whole file, so a
+    Business Line or region keeps its colour when filters remove others.
+    Colours are never cycled: values past the eighth are drawn in neutral
+    grey (each bar still names its value on hover)."""
+    values = sorted(filter_dims(df, [column])[column].dropna().astype(str).unique())
+    return {v: (CATEGORICAL[i] if i < len(CATEGORICAL) else "#6b6c70")
+            for i, v in enumerate(values)}
+
+
+def material_label(material: str) -> str:
+    """'Dissolvine E-39, bulk__5401493' -> 'Dissolvine E-39, bulk (5401493)'.
+    The code stays visible: it keeps same-named materials distinct."""
+    text = str(material)
+    if "__" in text:
+        name, code = text.rsplit("__", 1)
+        return f"{name.strip()} ({code.strip()})"
+    return text
+
+
+def mask_trailing_zeros(series: pd.Series) -> pd.Series:
+    """Blank the zero run at the end of a forecast line.
+
+    A forecast cycle that stops short of the file's last month is exported
+    as zeros, which drew a plunge to 0 that read as 'forecast is zero'.
+    Interior zeros are real values and stay.
+    """
+    nz = series[(series.notna()) & (series != 0)]
+    if nz.empty:
+        return series.where(series != 0)
+    return series.where(series.index <= nz.index.max())
+
+
+def add_cycle_marks(fig: "go.Figure", boundary, x_max) -> None:
+    """The shared history/forecast marker: a faint wash over the forecast
+    period and a labelled line at the last actual month (labels sit just
+    above the plot area, so they never cover data)."""
+    boundary = pd.Timestamp(boundary)
+    if pd.Timestamp(x_max) > boundary:
+        fig.add_vrect(x0=boundary, x1=x_max, fillcolor=FORECAST_BAND_COLOR,
+                      line_width=0, layer="below")
+        fig.add_annotation(x=boundary, xref="x", y=1, yref="paper",
+                           text="Forecast", showarrow=False, xanchor="left",
+                           yanchor="bottom", xshift=6, yshift=2,
+                           font=dict(size=11, color="#f0875a"))
+    fig.add_vline(x=boundary, line=dict(color="#3d4a5c", width=1))
+    fig.add_annotation(x=boundary, xref="x", y=1, yref="paper",
+                       text=f"Last actual {boundary.strftime('%b %Y')}",
+                       showarrow=False, xanchor="right", yanchor="bottom",
+                       xshift=-6, yshift=2,
+                       font=dict(size=11, color=TEXT_MUTED))
+
+
+def time_series_trace(x, y, data_label: str, style: dict,
+                      name: Optional[str] = None, legend_group: bool = True,
+                      **overrides) -> "go.Scatter":
+    """A monthly line drawn with straight segments (no spline overshoot);
+    history uses circles, forecast diamonds, so identity is never colour
+    alone."""
+    category = style.get("category", "Other")
+    kwargs = dict(
+        x=x, y=y, mode="lines+markers",
+        name=name or SERIES_DISPLAY_NAME.get(data_label, data_label),
+        line=dict(color=style["color"], width=2),
+        marker=dict(size=5, color=style["color"],
+                    symbol="circle" if category == "History" else "diamond"),
+        hovertemplate="%{y:,.0f} kg",
+        connectgaps=False,
+        legendrank=SERIES_RANK.get(data_label, 50),
+    )
+    if legend_group:
+        kwargs.update(legendgroup=category, legendgrouptitle_text=category)
+    kwargs.update(overrides)
+    return go.Scatter(**kwargs)
+
+
+def trend_trace(trend: dict, name: str, color: str) -> "go.Scatter":
+    """A fitted trend wears its series' colour, dashed and lighter."""
+    return go.Scatter(
+        x=trend["dates"], y=trend["fit_line"], mode="lines", name=name,
+        line=dict(color=color, width=1.5, dash="dash"), opacity=0.85,
+        legendgroup="Trend", legendgrouptitle_text="Trend",
+        hovertemplate="%{y:,.0f} kg",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +876,10 @@ def load_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, List[pd
     # would make per-Key loops iterate over absent Keys.)
     long_df["Value"] = long_df["Value"].astype("float32")
 
+    # File fingerprint, carried by pandas through row filtering. Lets the
+    # filter panels cache their small option table per file (see filter_dims).
+    long_df.attrs["fva_token"] = hashlib.sha1(file_bytes).hexdigest()[:16]
+
     sorted_months = sorted({ts for _, ts in parsed_months})
     return long_df, sorted_months
 
@@ -652,16 +900,89 @@ def extract_month_from_filename(file_name: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Filtering helpers
 # ---------------------------------------------------------------------------
+# Why filters used to "vanish":
+#   Streamlit identifies a widget by its key *plus* some of its parameters.
+#   For st.multiselect / st.selectbox the option list is part of that
+#   identity, and for st.select_slider / st.radio every parameter is. A
+#   cascading filter changes the option lists of the OTHER filters whenever
+#   one filter changes, so Streamlit treated those filters as brand-new
+#   widgets and discarded their selections (and a plain rerun then wiped the
+#   rest).
+#
+# The fix: every data-dependent widget keeps its value in a separate
+# "store" key that Streamlit never discards. An on_change callback copies
+# the user's choice into the store, and on every run the widget is
+# re-seeded from the store *before* it is created (the only time Streamlit
+# lets code set a widget's value). Re-creating a widget can therefore no
+# longer lose the selection.
 def unique_sorted(series: pd.Series) -> List[str]:
     return sorted(series.dropna().astype(str).unique().tolist())
 
 
+def _filter_store_key(key_prefix: str, col: str) -> str:
+    return f"{key_prefix}::{col}"
+
+
+def _filter_widget_key(key_prefix: str, col: str) -> str:
+    return f"{key_prefix}::{col}::w"
+
+
+def _sync_widget_to_store(widget_key: str, store_key: str) -> None:
+    """on_change callback: copy a widget's new value into its store key."""
+    value = st.session_state.get(widget_key)
+    if isinstance(value, tuple):
+        value = tuple(value)
+    elif isinstance(value, list):
+        value = list(value)
+    st.session_state[store_key] = value
+
+
 def apply_filters(df: pd.DataFrame, selections: dict) -> pd.DataFrame:
-    out = df
+    """Rows of ``df`` matching every non-empty selection.
+
+    Builds one combined boolean mask and slices once (instead of slicing the
+    1M-row table once per filter). Filter columns are already strings after
+    ``load_excel``; non-string columns are compared as strings.
+    """
+    mask = None
     for col, sel in selections.items():
-        if sel:  # non-empty list ⇒ active filter
-            out = out[out[col].astype(str).isin([str(v) for v in sel])]
-    return out
+        if not sel or col not in df.columns:
+            continue
+        series = df[col]
+        if series.dtype != object:
+            series = series.astype(str)
+        m = series.isin([str(v) for v in sel]).to_numpy()
+        mask = m if mask is None else (mask & m)
+    if mask is None:
+        return df
+    return df[mask]
+
+
+def _df_token(df: pd.DataFrame) -> Optional[str]:
+    """Cheap identity for a frame derived from the loaded file.
+
+    ``load_excel`` stamps ``attrs["fva_token"]`` (the file fingerprint);
+    pandas carries attrs through row filtering, so the Sales-History subset
+    used by the outlier tab gets its own token via its row count.
+    """
+    token = df.attrs.get("fva_token")
+    return None if token is None else f"{token}|{len(df)}"
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_filter_dims(token: str, columns: Tuple[str, ...],
+                        _df: pd.DataFrame) -> pd.DataFrame:
+    return _df[list(columns)].drop_duplicates().reset_index(drop=True)
+
+
+def filter_dims(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Unique combinations of the filter columns (~3,400 rows instead of
+    ~1M). The cascade is computed on this small table, which is what keeps
+    filter clicks fast."""
+    token = _df_token(df)
+    if token is None:
+        return df[list(columns)].drop_duplicates().reset_index(drop=True)
+    return _cached_filter_dims(token, tuple(columns), df)
 
 
 def cascading_options(
@@ -669,17 +990,38 @@ def cascading_options(
     columns: List[str],
     current_selections: dict,
 ) -> dict:
-    """For each filter column, compute the option universe consistent with
-    the current selections in **all other** filter columns (Excel-slicer
-    behaviour: a column's own selection doesn't narrow its own option list).
+    """For each filter column, the values consistent with the selections in
+    **all other** filter columns (Excel-slicer behaviour: a filter never
+    narrows its own list). ``df`` may be the full table or its dims table.
     """
     options: dict = {}
     for col in columns:
-        other_selections = {c: v for c, v in current_selections.items()
-                            if c != col and v}
-        narrowed = apply_filters(df, other_selections)
-        options[col] = unique_sorted(narrowed[col])
+        others = {c: v for c, v in current_selections.items()
+                  if c != col and v}
+        options[col] = unique_sorted(apply_filters(df, others)[col])
     return options
+
+
+def _reset_filter_strip(key_prefix: str, columns: Tuple[str, ...],
+                        defaults: dict) -> None:
+    """on_click callback for the Reset button (runs before the rerun, so it
+    may freely change widget keys)."""
+    for col in columns:
+        value = list(defaults.get(col, []))
+        st.session_state[_filter_store_key(key_prefix, col)] = value
+        st.session_state[_filter_widget_key(key_prefix, col)] = value
+
+
+def active_filter_summary(selections: dict) -> str:
+    """Plain-language summary of the active filters, e.g.
+    'Business Line: Cleaning__BL02 · Arkieva Active Status: 2 selected'."""
+    parts = []
+    for col, sel in selections.items():
+        if not sel:
+            continue
+        parts.append(f"{col}: {sel[0]}" if len(sel) == 1
+                     else f"{col}: {len(sel)} selected")
+    return " · ".join(parts)
 
 
 def render_filter_strip(
@@ -689,109 +1031,168 @@ def render_filter_strip(
     n_per_row: int = 4,
     default_selections: Optional[dict] = None,
 ) -> dict:
-    """Render a cascading multi-select filter strip above the chart.
+    """Render a cascading multi-select filter strip and return the
+    selections as ``{column: [values]}``.
 
     Behaviour matches Excel slicers:
-    * Each filter shows only values consistent with the selections in the
-      *other* filters (a filter never narrows its own options).
+    * Each filter lists only values consistent with the *other* filters.
     * Selecting values in one filter narrows the options in every other.
-    * Selections persist across reruns and tab switches — the widget owns its
-      state and we never overwrite a live widget key, so nothing resets.
+    * Selections persist across reruns, other widgets and tab switches.
+      A value you picked is always kept in its list, so the cascade never
+      silently drops it; clearing it is always your decision.
 
-    ``default_selections`` maps a column name to values pre-selected on the
-    FIRST render for this ``key_prefix`` (e.g. Arkieva Active Status →
-    Active + Sparse). Applied once; afterwards the user's choices (including
-    clearing) are respected. The 🔄 Reset button restores the defaults.
-
-    Each tab passes a unique ``key_prefix`` so filter state is independent
-    across tabs (and Streamlit never sees duplicate widget keys).
-
-    IMPORTANT (Streamlit state rules): the multiselect's stored value lives at
-    ``st.session_state[f"{key_prefix}::{col}"]``. We must NOT reassign that key
-    on a run where the widget is (re)created, and the ``options`` we pass MUST
-    contain every currently-selected value — otherwise Streamlit silently
-    drops the missing ones, which is exactly what made selections disappear.
-    We therefore (a) seed defaults only before the widget's first creation and
-    (b) union each filter's cascaded options with its own current selection so
-    no live value is ever excluded.
+    ``default_selections`` (e.g. Arkieva Active Status → Active + Sparse)
+    are applied the first time a tab's strip renders; afterwards the user's
+    choices, including clearing a filter, are respected. Reset restores
+    them. Each tab passes its own ``key_prefix``, so tabs filter
+    independently.
     """
     default_selections = default_selections or {}
+    dims = filter_dims(df, columns)
+    all_values = {col: set(dims[col].astype(str)) for col in columns}
 
-    # --- One-time defaults ---------------------------------------------------
-    # Seed a filter's state only the very first time this strip renders for
-    # this key_prefix, and only BEFORE the widget is instantiated (so we're
-    # not mutating a live widget key). Tracked by a per-prefix init flag.
+    # ---- One-time defaults (seed the stores, never the widgets) -----------
     init_flag = f"{key_prefix}::__initialized__"
     if not st.session_state.get(init_flag, False):
         for col, default_vals in default_selections.items():
-            state_key = f"{key_prefix}::{col}"
-            if state_key not in st.session_state:
-                valid = [v for v in default_vals
-                         if v in set(df[col].astype(str))]
-                st.session_state[state_key] = valid
+            if col not in all_values:
+                continue
+            store_key = _filter_store_key(key_prefix, col)
+            if store_key not in st.session_state:
+                st.session_state[store_key] = [
+                    v for v in default_vals if v in all_values[col]]
         st.session_state[init_flag] = True
 
-    # --- Read current selections straight from widget state ------------------
-    # (What the user last chose. Don't rewrite these keys — the widgets own
-    # them.) Values that no longer exist in the data at all are ignored for
-    # option-computation but left in state; Streamlit prunes them harmlessly
-    # once we include current selections in the options union below.
-    current_selections: dict = {}
-    all_values = {col: set(df[col].astype(str)) for col in columns}
+    # ---- Current selections come from the stores ---------------------------
+    current: dict = {}
     for col in columns:
-        raw = st.session_state.get(f"{key_prefix}::{col}", [])
-        if not isinstance(raw, list):
+        raw = st.session_state.get(_filter_store_key(key_prefix, col), [])
+        if not isinstance(raw, (list, tuple)):
             raw = []
-        # keep only values that still exist somewhere in the data
-        current_selections[col] = [v for v in raw if v in all_values[col]]
+        current[col] = [str(v) for v in raw if str(v) in all_values[col]]
 
-    # --- Cascade: options for each filter given the OTHER filters ------------
-    options_per_col = cascading_options(df, columns, current_selections)
+    options_per_col = cascading_options(dims, columns, current)
 
-    # --- Render widgets ------------------------------------------------------
+    # ---- Widgets -------------------------------------------------------------
     rows = [columns[i:i + n_per_row] for i in range(0, len(columns), n_per_row)]
-    selections: dict = {}
     for row in rows:
-        slots = st.columns(len(row))
+        slots = st.columns(n_per_row)
         for slot, col_name in zip(slots, row):
             cascaded = options_per_col[col_name]
-            selected_now = current_selections[col_name]
-            # Union cascaded options with the current selection so Streamlit
-            # never drops a live value (order: cascaded first, then any
-            # selected value not already present — e.g. one that only the
-            # other filters would exclude).
-            opts = list(cascaded)
-            for v in selected_now:
-                if v not in cascaded:
-                    opts.append(v)
+            chosen = current[col_name]
+            # Keep chosen values in the list even if the other filters now
+            # exclude them, so they stay visible and removable.
+            opts = list(cascaded) + [v for v in chosen if v not in cascaded]
             full_count = len(all_values[col_name])
-            placeholder = (
-                f"All ({len(cascaded)})"
-                if len(cascaded) == full_count
-                else f"{len(cascaded)} of {full_count} (filtered)"
-            )
+            placeholder = (f"All {full_count}" if len(cascaded) == full_count
+                           else f"{len(cascaded)} of {full_count} available")
+            widget_key = _filter_widget_key(key_prefix, col_name)
+            store_key = _filter_store_key(key_prefix, col_name)
+            # Seed the widget from its store BEFORE creating it.
+            st.session_state[widget_key] = list(chosen)
             with slot:
-                selections[col_name] = st.multiselect(
+                st.multiselect(
                     col_name,
                     options=opts,
-                    default=None,  # value comes from session_state[key]
-                    key=f"{key_prefix}::{col_name}",
+                    key=widget_key,
                     placeholder=placeholder,
+                    on_change=_sync_widget_to_store,
+                    args=(widget_key, store_key),
                 )
 
-    spacer, btn_col = st.columns([8, 2])
-    with btn_col:
-        if st.button("🔄 Reset filters", key=f"{key_prefix}::reset",
-                     width="stretch"):
-            # Clear every filter widget key so the multiselects re-seed from
-            # defaults on the next run, then drop the init flag so defaults
-            # re-apply. Use pop (never raises) and rerun.
-            for col_name in columns:
-                st.session_state.pop(f"{key_prefix}::{col_name}", None)
-            st.session_state.pop(init_flag, None)
-            st.rerun()
+    # ---- Footer: active-filter summary + Reset --------------------------------
+    valid_defaults = {
+        col: [v for v in vals if v in all_values.get(col, set())]
+        for col, vals in default_selections.items()
+    }
+    summary = active_filter_summary(current)
+    left, right = st.columns([5, 1], vertical_alignment="center")
+    with left:
+        st.caption(summary if summary else "No filters applied — showing everything.")
+    with right:
+        st.button(
+            "Reset filters", key=f"{key_prefix}::reset", width="stretch",
+            on_click=_reset_filter_strip,
+            args=(key_prefix, tuple(columns), valid_defaults),
+            help="Restore this tab's default filters.",
+        )
 
-    return selections
+    return current
+
+
+def filter_panel(
+    df: pd.DataFrame,
+    columns: List[str],
+    key_prefix: str,
+    default_selections: Optional[dict] = None,
+) -> dict:
+    """The bordered Filters panel every tab shows above its content."""
+    with st.container(border=True, key=f"{key_prefix}__filter_panel"):
+        note = ("Each filter narrows the others, like Excel slicers. "
+                "Arkieva Active Status starts at Active + Sparse."
+                if default_selections else
+                "Each filter narrows the others, like Excel slicers. "
+                "Leave a filter empty to include everything.")
+        st.markdown(f'<div class="fva-panel-title">Filters</div>'
+                    f'<div class="fva-panel-note">{note}</div>',
+                    unsafe_allow_html=True)
+        return render_filter_strip(df, columns, key_prefix,
+                                   default_selections=default_selections)
+
+
+# ---- Sticky single-value widgets ---------------------------------------------
+# Same store-and-reseed pattern for pickers whose options depend on the data
+# (e.g. the Key picker), so a filter change doesn't snap them back to the
+# first item while the chosen item is still available.
+def _store_key(widget_key: str) -> str:
+    return f"{widget_key}::store"
+
+
+def sticky_selectbox(label: str, options: list, key: str,
+                     default_index: int = 0, **kwargs):
+    if not options:
+        return None
+    store = _store_key(key)
+    value = st.session_state.get(store)
+    if value not in options:
+        value = options[min(default_index, len(options) - 1)]
+    st.session_state[key] = value
+    return st.selectbox(label, options, key=key,
+                        on_change=_sync_widget_to_store, args=(key, store),
+                        **kwargs)
+
+
+def sticky_radio(label: str, options: list, key: str,
+                 default_index: int = 0, **kwargs):
+    store = _store_key(key)
+    value = st.session_state.get(store)
+    if value not in options:
+        value = options[min(default_index, len(options) - 1)]
+    st.session_state[key] = value
+    return st.radio(label, options, key=key,
+                    on_change=_sync_widget_to_store, args=(key, store),
+                    **kwargs)
+
+
+def sticky_range_select_slider(label: str, options: list, key: str,
+                               default: tuple, **kwargs) -> tuple:
+    """Range select_slider that keeps the user's range.
+
+    Unlike the other sticky widgets this one is NOT seeded through session
+    state: a select_slider created without ``value`` starts as a single-thumb
+    slider, and seeding a (start, end) range into it crashes the browser
+    component (TypeError: reading 'current'). Passing the remembered range as
+    ``value`` gives the same guarantee: when the options change (new filter
+    selection) Streamlit re-creates the widget at the remembered range.
+    """
+    store = _store_key(key)
+    value = st.session_state.get(store)
+    if not (isinstance(value, (tuple, list)) and len(value) == 2
+            and value[0] in options and value[1] in options):
+        value = default
+    return st.select_slider(label, options=options, value=tuple(value),
+                            key=key, on_change=_sync_widget_to_store,
+                            args=(key, store), **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1857,9 +2258,13 @@ def compute_stf_variance(
     grp.columns = ["CurrentSTF", "Lag1STF"]
     grp = grp.reset_index()
 
+    # A prior-cycle total under STF_MIN_BASE_KG has no meaningful base:
+    # Arkieva exports float residues (~1e-22 kg) that previously produced
+    # variances like 4e26 %. Those Keys get no % variance.
+    base_ok = grp["Lag1STF"].abs() >= STF_MIN_BASE_KG
     grp["STF Variance"] = np.where(
-        grp["Lag1STF"] != 0,
-        (grp["CurrentSTF"] - grp["Lag1STF"]) / grp["Lag1STF"],
+        base_ok,
+        (grp["CurrentSTF"] - grp["Lag1STF"]) / grp["Lag1STF"].where(base_ok, 1.0),
         np.nan,
     )
     grp["Absolute STF Variance"] = grp["STF Variance"].abs()
@@ -1909,9 +2314,10 @@ def compute_stf_month_variance(
     piv = piv.reindex(columns=[STF_CURRENT_LABEL, STF_LAG1_LABEL]).fillna(0.0)
     piv.columns = ["CurrentSTF", "Lag1STF"]
     piv = piv.reset_index()
+    base_ok = piv["Lag1STF"].abs() >= STF_MIN_BASE_KG
     piv["STF Variance"] = np.where(
-        piv["Lag1STF"] != 0,
-        (piv["CurrentSTF"] - piv["Lag1STF"]) / piv["Lag1STF"],
+        base_ok,
+        (piv["CurrentSTF"] - piv["Lag1STF"]) / piv["Lag1STF"].where(base_ok, 1.0),
         np.nan,
     )
     piv["Absolute STF Variance"] = piv["STF Variance"].abs()
@@ -2242,19 +2648,18 @@ def reset_app_state() -> None:
 # ---------------------------------------------------------------------------
 # UI – Tab: Anomaly Summary
 # ---------------------------------------------------------------------------
+@st.fragment
 def render_anomaly_tab(long_df: pd.DataFrame) -> None:
-    st.subheader("🧭 Anomaly Summary")
-    st.caption("Top anomalies per Ship To Sub Region, with reason codes. "
-               "Drill down for root cause and next steps.")
+    st.markdown(
+        '<div class="fva-tab-intro">'
+        'Keys whose forecast breaks from their sales history, ranked by severity within each Ship To Sub Region. Pick a Key further down to see the root cause and suggested next steps.'
+        "</div>", unsafe_allow_html=True)
 
     # ---- Filters (same set as the Forecast vs Actuals tab) -----------------
-    with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
-                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
-        anom_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
-        selections = render_filter_strip(
-            long_df, anom_filter_cols, key_prefix="anom",
-            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
+    anom_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
+    selections = filter_panel(
+        long_df, anom_filter_cols, key_prefix="anom",
+        default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     filtered = apply_filters(long_df, selections)
     if filtered.empty:
@@ -2271,8 +2676,8 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
     summary = build_anomaly_summary(filtered, top_n=top_n)
 
     if summary.empty:
-        st.success("No anomalies detected for the current filter selection. 🎉")
-        with st.expander("How are anomalies detected?"):
+        st.success("No anomalies detected for the current filter selection.")
+        with st.expander("How anomalies are detected and scored"):
             _render_reason_code_legend()
         return
 
@@ -2286,39 +2691,51 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
               f"{(summary['Primary code'] == 'SEASONALITY_LOSS').sum():,}")
 
     # ---- Reason-code breakdown ---------------------------------------------
-    st.markdown("### 📊 Reason-code breakdown")
+    st.markdown("### Reason-code breakdown")
     breakdown = (summary["Primary reason"].value_counts()
                  .rename_axis("Reason").reset_index(name="Keys"))
     bcol, lcol = st.columns([1.3, 1])
     with bcol:
+        breakdown = breakdown.sort_values("Keys")
         fig = go.Figure(go.Bar(
             x=breakdown["Keys"], y=breakdown["Reason"], orientation="h",
-            marker=dict(color="#4da3ff"),
-            hovertemplate="%{y}<br>%{x} Key(s)<extra></extra>",
+            marker=dict(color=CATEGORICAL[0], cornerradius=3),
+            text=breakdown["Keys"], textposition="outside", cliponaxis=False,
+            textfont=dict(color=TEXT_PRIMARY, size=12),
+            hovertemplate="%{y}: %{x} Key(s)<extra></extra>",
         ))
         dark_layout(
-            fig, title="Primary reason code — Key count",
-            xaxis_title="Number of Keys", yaxis_title="",
-            height=260, margin=dict(t=50, l=10, r=20, b=40),
-            legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center"),
+            fig, title="Primary reason code by Key count",
+            xaxis_title="Keys (by primary reason)", yaxis_title=None,
+            height=120 + 46 * len(breakdown), showlegend=False,
+            hovermode="closest", margin=dict(t=16, l=8, r=40, b=40),
         )
-        fig.update_yaxes(tickformat="")
-        st.plotly_chart(fig, width="stretch",
-                        config={"displaylogo": False})
+        fig.update_xaxes(showgrid=True, gridcolor=INK_GRID, showline=False,
+                         showspikes=False)
+        fig.update_yaxes(showgrid=False, ticksuffix="  ", automargin=True,
+                         showspikes=False, tickfont=dict(color=TEXT_SECONDARY))
+        show_chart(fig)
     with lcol:
-        st.markdown("**Severity by Sub Region (max)**")
-        region_sev = (summary.groupby("Ship To Sub Region")["Severity"].max()
-                      .sort_values(ascending=False).reset_index())
+        st.markdown("**Highest severity per Ship To Sub Region**")
+        region_sev = (summary.groupby("Ship To Sub Region")
+                      .agg(Severity=("Severity", "max"), Keys=("Key", "nunique"))
+                      .sort_values("Severity", ascending=False).reset_index())
         st.dataframe(
-            region_sev.style.format({"Severity": "{:.1f}"}),
-            width="stretch", hide_index=True,
+            region_sev, width="stretch", hide_index=True,
+            column_config={
+                "Severity": st.column_config.ProgressColumn(
+                    "Max severity", min_value=0,
+                    max_value=float(max(100.0, region_sev["Severity"].max())),
+                    format="%.0f"),
+                "Keys": st.column_config.NumberColumn("Anomalous Keys"),
+            },
         )
 
     # ---- Per-region table ---------------------------------------------------
-    st.markdown(f"### 📋 Top {top_n} anomalies per Ship To Sub Region")
+    st.markdown(f"### Top {top_n} anomalies per Ship To Sub Region")
     regions = sorted(summary["Ship To Sub Region"].unique().tolist())
-    region_pick = st.selectbox(
-        "Ship To Sub Region", ["(All regions)"] + regions, index=0,
+    region_pick = sticky_selectbox(
+        "Ship To Sub Region", ["(All regions)"] + regions,
         key="anom::region_pick",
     )
     table = summary if region_pick == "(All regions)" \
@@ -2328,33 +2745,44 @@ def render_anomaly_tab(long_df: pd.DataFrame) -> None:
                     "All reasons", "Severity", "Detail", "IQR outliers",
                     "Hist %/yr", "Fcst %/yr", "Seasonal corr"]
     st.dataframe(
-        table[display_cols].style.format({
-            "Severity": "{:.1f}",
-            "Hist %/yr": lambda v: "–" if pd.isna(v) else f"{v:+.1f}%",
-            "Fcst %/yr": lambda v: "–" if pd.isna(v) else f"{v:+.1f}%",
-            "Seasonal corr": lambda v: "–" if pd.isna(v) else f"{v:+.2f}",
-        }, na_rep="–"),
-        width="stretch", hide_index=True, height=380,
+        table[display_cols], width="stretch", hide_index=True, height=400,
+        column_config={
+            "Severity": st.column_config.ProgressColumn(
+                "Severity", min_value=0,
+                max_value=float(max(100.0, summary["Severity"].max())),
+                format="%.0f"),
+            "Key": st.column_config.TextColumn("Key", width="medium"),
+            "All reasons": st.column_config.TextColumn("All reasons", width="medium"),
+            "Detail": st.column_config.TextColumn("Detail", width="large"),
+            "IQR outliers": st.column_config.NumberColumn("IQR outliers", format="%d"),
+            "Hist %/yr": st.column_config.NumberColumn("History trend", format="%+.1f%%",
+                                                       help="Fitted history trend, % per year"),
+            "Fcst %/yr": st.column_config.NumberColumn("Forecast trend", format="%+.1f%%",
+                                                       help="Fitted forecast trend, % per year"),
+            "Seasonal corr": st.column_config.NumberColumn(
+                "Seasonal match", format="%+.2f",
+                help="Correlation of forecast vs historical seasonal shape (1 = same shape)"),
+        },
     )
 
     csv = table[display_cols].to_csv(index=False)
     st.download_button(
-        "⬇️ Download anomaly summary (CSV)", data=csv,
+        "Download anomaly summary (CSV)", data=csv,
         file_name="anomaly_summary.csv", mime="text/csv",
         key="anom::dl",
     )
 
     # ---- Drill-down ---------------------------------------------------------
-    st.markdown("### 🔬 Drill-down to root cause")
-    st.caption("Pick a Key for root cause and next steps.")
+    st.markdown("### Root cause for a Key")
+    st.caption("Keys are listed from most to least severe.")
     key_choices = table.sort_values("Severity", ascending=False)["Key"].tolist()
     if not key_choices:
         return
-    chosen = st.selectbox("Key", key_choices, index=0, key="anom::drill_key")
+    chosen = sticky_selectbox("Key", key_choices, key="anom::drill_key")
 
     _render_anomaly_drilldown(chosen, filtered)
 
-    with st.expander("ℹ️ How are anomalies detected and scored?"):
+    with st.expander("How anomalies are detected and scored"):
         _render_reason_code_legend()
 
 
@@ -2375,85 +2803,78 @@ def _render_anomaly_drilldown(key: str, filtered_df: pd.DataFrame) -> None:
         st.info("No anomaly details available for this Key.")
         return
 
-    # Severity + codes header
-    chips = " ".join(
-        f"<span style='background:#2d4b7a;color:#fff;padding:2px 8px;"
-        f"border-radius:10px;margin-right:6px;font-size:0.82em;'>"
-        f"{REASON_CODES[c]['label']}</span>"
+    # Severity + reason codes
+    chips = "".join(
+        f'<span class="fva-chip">{REASON_CODES[c]["label"]}</span>'
         for c in profile["all_codes"]
     )
     st.markdown(
-        f"**Key:** `{key}`  •  **Severity:** {profile['severity']:.1f}<br>{chips}",
+        f'<div class="fva-keyline"><span class="fva-key">{key}</span>'
+        f'<span class="fva-sev">Severity {profile["severity"]:.0f}</span>'
+        f'{chips}</div>',
         unsafe_allow_html=True,
     )
 
-    # Mini chart: history (+cleansed) & forecast with the boundary
+    # Mini chart: history & forecast with trends and outliers
     sales_grp = profile["sales_grp"]
     fcst_grp = profile["fcst_grp"]
     iqr_res = profile["metrics"].get("iqr_result")
 
     fig = go.Figure()
+    x_max = max([d.max() for d in (sales_grp["Date"], fcst_grp["Date"])
+                 if len(d)] or [boundary])
     if boundary is not None:
-        fig.add_vline(x=boundary, line=dict(color=DARK_MUTED, width=1, dash="dot"))
-    fig.add_trace(go.Scatter(
-        x=sales_grp["Date"], y=sales_grp["Value"], mode="lines+markers",
-        name="Sales History",
-        line=dict(color=SERIES_STYLE[SALES_HISTORY_LABEL]["color"], width=2.4),
-        marker=dict(size=5),
-        hovertemplate="Sales History<br>%{x|%b %Y}<br>%{y:,.0f}<extra></extra>",
-    ))
+        add_cycle_marks(fig, boundary, x_max)
+    fig.add_trace(time_series_trace(
+        sales_grp["Date"], sales_grp["Value"], SALES_HISTORY_LABEL,
+        SERIES_STYLE[SALES_HISTORY_LABEL], name="Sales history",
+        legend_group=False))
     if not fcst_grp.empty:
-        fig.add_trace(go.Scatter(
-            x=fcst_grp["Date"], y=fcst_grp["Value"], mode="lines+markers",
-            name="Statistical Forecast",
-            line=dict(color=SERIES_STYLE[STAT_FORECAST_LABEL]["color"], width=2.4),
-            marker=dict(size=5, symbol="diamond"),
-            hovertemplate="Forecast<br>%{x|%b %Y}<br>%{y:,.0f}<extra></extra>",
-        ))
-    # Trend overlays
+        fig.add_trace(time_series_trace(
+            fcst_grp["Date"], mask_trailing_zeros(
+                fcst_grp.set_index("Date")["Value"]).values,
+            STAT_FORECAST_LABEL, SERIES_STYLE[STAT_FORECAST_LABEL],
+            name="Statistical forecast", legend_group=False))
     ht = profile["metrics"].get("hist_trend")
     ft = profile["metrics"].get("fcst_trend")
     if ht is not None:
-        fig.add_trace(go.Scatter(
-            x=ht["dates"], y=ht["fit_line"], mode="lines", name="History trend",
-            line=dict(color=HISTORY_TREND_COLOR, width=2, dash="dash"),
-        ))
+        tr = trend_trace(ht, "History trend", HISTORY_TREND_COLOR)
+        tr.update(legendgroup=None, legendgrouptitle_text=None)
+        fig.add_trace(tr)
     if ft is not None:
-        fig.add_trace(go.Scatter(
-            x=ft["dates"], y=ft["fit_line"], mode="lines", name="Forecast trend",
-            line=dict(color=FORECAST_TREND_COLOR, width=2, dash="dash"),
-        ))
-    # Outlier markers
+        tr = trend_trace(ft, "Forecast trend", FORECAST_TREND_COLOR)
+        tr.update(legendgroup=None, legendgrouptitle_text=None)
+        fig.add_trace(tr)
     if iqr_res is not None:
         od = iqr_res[iqr_res["IsOutlier"]]
         if not od.empty:
             fig.add_trace(go.Scatter(
                 x=od["Date"], y=od["Value"], mode="markers", name="IQR outlier",
-                marker=dict(color="#ff6b6b", size=12, symbol="x-thin",
-                            line=dict(color="#ff6b6b", width=3)),
-                hovertemplate="Outlier<br>%{x|%b %Y}<br>%{y:,.0f}<extra></extra>",
+                marker=dict(size=13, symbol="circle-open", color=TEXT_PRIMARY,
+                            line=dict(width=2)),
+                hovertemplate="%{y:,.0f} kg (outlier)",
             ))
     dark_layout(
-        fig, title=f"{key} — history, forecast & trends",
-        xaxis_title="Months", yaxis_title="Demand volume in kgs",
-        height=420,
-        legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center",
-                    bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-        margin=dict(t=60, l=60, r=30, b=110),
+        fig, title=f"{key} history forecast trends",
+        xaxis_title=None, yaxis_title="Demand (kg)", height=400,
+        margin=dict(t=56, l=64, r=24, b=40),
     )
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
+    fig.update_yaxes(tickformat="~s")
+    show_chart(fig)
 
     # Supporting metrics
     mc1, mc2, mc3 = st.columns(3)
     h_pct = profile["metrics"].get("hist_pct_per_year")
     f_pct = profile["metrics"].get("fcst_pct_per_year")
     corr = profile["metrics"].get("seasonal_corr")
-    mc1.metric("History trend", "–" if h_pct is None else f"{h_pct:+.1f}%/yr")
-    mc2.metric("Forecast trend", "–" if f_pct is None else f"{f_pct:+.1f}%/yr")
-    mc3.metric("Seasonal corr", "–" if corr is None else f"{corr:+.2f}")
+    mc1.metric("History trend", "–" if h_pct is None else f"{h_pct:+.1f}% / yr")
+    mc2.metric("Forecast trend", "–" if f_pct is None else f"{f_pct:+.1f}% / yr")
+    mc3.metric("Seasonal match", "–" if corr is None else f"{corr:+.2f}",
+               help="Correlation between the forecast's and history's monthly "
+                    "seasonal shape; 1 means the same shape.")
 
     # Root cause + next steps for each applicable reason code
-    st.markdown("#### 🩺 Root cause & recommended next steps")
+    st.markdown("#### Root cause and next steps")
     for r in profile["reasons"]:
         code = r["code"]
         info = REASON_CODES[code]
@@ -2469,23 +2890,17 @@ def _render_anomaly_drilldown(key: str, filtered_df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 # UI – Tab: STF Variation & Exceptions
 # ---------------------------------------------------------------------------
+@st.fragment
 def render_stf_variation_tab(long_df: pd.DataFrame,
                              all_months: List[pd.Timestamp]) -> None:
-    st.subheader("📊 STF Variation & Exceptions")
-    st.caption(
-        "Compares the current **Statistical Forecast Committed** against "
-        "**Lag 1**. Variance = (Current − Lag 1) / Lag 1, per Key, over a "
-        "horizon that starts at **Month 4 (M4)** — the 4th month after the "
-        "last active Sales-History month."
-    )
+    st.markdown(
+        '<div class="fva-tab-intro">'
+        "How this cycle's committed statistical forecast moved against the prior cycle's, per Key. Variance = (current − prior) ÷ prior, summed over the horizon you choose. The horizon starts at M4, the fourth month after the last actual month."
+        "</div>", unsafe_allow_html=True)
 
     # ---- Filters (same as Forecast vs Actuals, minus Data; NO status default)
-    with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows "
-                    "the others). Leave a filter empty to include everything.")
-        stf_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
-        selections = render_filter_strip(
-            long_df, stf_filter_cols, key_prefix="stf")
+    stf_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
+    selections = filter_panel(long_df, stf_filter_cols, key_prefix="stf")
 
     filtered = apply_filters(long_df, selections)
     if filtered.empty:
@@ -2524,7 +2939,7 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
     with c1:
         fy_labels = [f"FY {fy} (Jan–Dec)" for fy in next_fys]
         mode_options = ["Custom range"] + fy_labels
-        mode = st.radio(
+        mode = sticky_radio(
             "Forecast horizon", mode_options, key="stf::mode",
             help="Pick a full fiscal year (Jan–Dec) or set a custom start/end "
                  "month with the slider. The horizon start is auto-detected "
@@ -2539,12 +2954,12 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
 
     with c2:
         if len(fcst_months) >= 2:
-            sel_start, sel_end = st.select_slider(
+            sel_start, sel_end = sticky_range_select_slider(
                 "Forecasting horizon months (start → end)",
                 options=fcst_months,
-                value=(default_start, default_end),
-                format_func=lambda d: pd.Timestamp(d).strftime("%b %Y"),
                 key="stf::range",
+                default=(default_start, default_end),
+                format_func=lambda d: pd.Timestamp(d).strftime("%b %Y"),
                 disabled=(mode != "Custom range"),
                 help="Auto-detected start (M4) through the last forecast "
                      "month. Drag either end to tweak the horizon. Disabled "
@@ -2578,20 +2993,21 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             st.info("No forecast months fall in the selected range.")
         return
 
-    horizon_note = (f"fiscal year **{fy_selected}**" if fy_selected is not None
+    horizon_note = (f"fiscal year {fy_selected}" if fy_selected is not None
                     else "custom range")
     st.caption(
-        f"Auto-detected start **M4 = {m4.strftime('%b %Y')}** · showing "
-        f"{horizon_note}: **{horizon_months[0].strftime('%b %Y')} – "
-        f"{horizon_months[-1].strftime('%b %Y')}** "
-        f"({len(horizon_months)} month(s)) · threshold **{threshold_pct}%**"
+        f"Horizon **{horizon_months[0].strftime('%b %Y')} to "
+        f"{horizon_months[-1].strftime('%b %Y')}** ({len(horizon_months)} "
+        f"months, {horizon_note}; M4 is {m4.strftime('%b %Y')}). Keys above "
+        f"**{threshold_pct}%** absolute variance count as exceptions."
     )
 
     # ---- Per-Key variance ---------------------------------------------------
     var_df = compute_stf_variance(filtered, tuple(horizon_months))
     if var_df.empty:
-        st.info("No Keys have a non-zero Lag 1 forecast in this horizon, so "
-                "variance can't be computed.")
+        st.info("No Keys have a prior-cycle forecast in this horizon, so "
+                "there is nothing to compare against. Widen the horizon or "
+                "the filters.")
         return
 
     n_exceptions = int((var_df["Absolute STF Variance"] > threshold).sum())
@@ -2600,21 +3016,24 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
     rollup_var = ((net_cur - net_lag) / net_lag) if net_lag else np.nan
 
     m1, m2, m3, m4c = st.columns(4)
-    m1.metric("Keys analysed", f"{len(var_df):,}")
-    m2.metric(f"Exceptions (> {threshold_pct}%)", f"{n_exceptions:,}")
-    m3.metric("Roll-up variance",
-              "–" if pd.isna(rollup_var) else f"{rollup_var*100:+.1f}%")
-    m4c.metric("Net STF change (kg)", f"{net_cur - net_lag:,.0f}")
+    m1.metric("Keys compared", f"{len(var_df):,}",
+              help=f"Keys with at least {STF_MIN_BASE_KG:,.0f} kg of prior-cycle "
+                   "forecast in the horizon (a smaller base gives no "
+                   "meaningful % variance).")
+    m2.metric(f"Exceptions above {threshold_pct}%", f"{n_exceptions:,}")
+    m3.metric("Total variance",
+              "–" if pd.isna(rollup_var) else f"{rollup_var*100:+.1f}%",
+              help="(Σ current − Σ prior) ÷ Σ prior across the Keys compared.")
+    net = net_cur - net_lag
+    m4c.metric("Net change", ("+" if net > 0 else "") + format_kg(net))
 
     # ---- History (36m back) vs forecast vintages (24m forward) -------------
-    st.markdown("### 📉 History & forecast vintages")
+    st.markdown("### This cycle's forecast against the prior cycle")
     st.caption(
-        "Aggregated over the current filter selection: the **last 36 months** "
-        "of **Sales History** and **History For Forecast** (up to the last "
-        "active history month), and the **next 24 months** of the **current "
-        "Statistical Forecast Committed** and **Lag 1**. Where the two "
-        "committed lines separate is where this cycle's forecast changed "
-        "from the prior cycle."
+        "The last 36 months of sales history and the next 24 months of the "
+        "current and prior-cycle committed statistical forecast, summed over "
+        "the filters. Where the two forecast lines part is where this "
+        "cycle's forecast changed."
     )
     boundary = history_forecast_boundary(filtered)
     if boundary is None:
@@ -2625,63 +3044,53 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
         fcst_start = (pd.Timestamp(boundary) + pd.DateOffset(months=1)).replace(day=1)
         fcst_end = (pd.Timestamp(boundary) + pd.DateOffset(months=24)).replace(day=1)
 
-        # (label, display name, colour, window start, window end)
+        # (Data label, display name, window start, window end)
         cmp_series = [
-            (SALES_HISTORY_LABEL, "Sales History (last 36m)",
-             SERIES_STYLE[SALES_HISTORY_LABEL]["color"], hist_start, boundary),
-            (HISTORY_FOR_FORECAST_LABEL, "History For Forecast (last 36m)",
-             SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"], hist_start, boundary),
-            (STF_CURRENT_LABEL, "Statistical Forecast Committed (next 24m)",
-             SERIES_STYLE[STAT_FORECAST_LABEL]["color"], fcst_start, fcst_end),
-            (STF_LAG1_LABEL, "Statistical Forecast Committed — prior cycle (next 24m)",
-             "#c084fc", fcst_start, fcst_end),
+            (HISTORY_FOR_FORECAST_LABEL, "History for forecast", hist_start, boundary),
+            (SALES_HISTORY_LABEL, "Sales history", hist_start, boundary),
+            (STF_CURRENT_LABEL, "Statistical forecast, this cycle", fcst_start, fcst_end),
+            (STF_LAG1_LABEL, "Statistical forecast, prior cycle", fcst_start, fcst_end),
         ]
-        cmp_agg = (filtered[filtered["Data"].isin([s[0] for s in cmp_series])]
+        cmp_agg = (filtered[filtered["Data"].isin([c[0] for c in cmp_series])]
                    .dropna(subset=["Value"])
                    .groupby(["Date", "Data"], as_index=False)["Value"].sum())
         fig_cmp = go.Figure()
-        fig_cmp.add_vline(x=boundary,
-                          line=dict(color=DARK_MUTED, width=1, dash="dot"))
+        add_cycle_marks(fig_cmp, boundary, fcst_end)
         n_traces = 0
-        for label, name, color, w_start, w_end in cmp_series:
-            s = cmp_agg[(cmp_agg["Data"] == label)
-                        & (cmp_agg["Date"] >= w_start)
-                        & (cmp_agg["Date"] <= w_end)]
-            if s.empty:
+        for label, name, w_start, w_end in cmp_series:
+            ser = cmp_agg[(cmp_agg["Data"] == label)
+                          & (cmp_agg["Date"] >= w_start)
+                          & (cmp_agg["Date"] <= w_end)].set_index("Date")["Value"]
+            if ser.empty:
                 continue
-            fig_cmp.add_trace(go.Scatter(
-                x=s["Date"], y=s["Value"], name=name, mode="lines+markers",
-                line=dict(color=color, width=2.2, shape="spline"),
-                marker=dict(size=4),
-                hovertemplate=f"{name}<br>%{{x|%b %Y}}<br>%{{y:,.0f}} kg"
-                              "<extra></extra>",
-            ))
+            style = SERIES_STYLE[STAT_FORECAST_LABEL if label == STF_CURRENT_LABEL
+                                 else label]
+            if style["category"] == "Forecast":
+                ser = mask_trailing_zeros(ser)
+            fig_cmp.add_trace(time_series_trace(ser.index, ser.values, label,
+                                                style, name=name))
             n_traces += 1
         if n_traces == 0:
             st.info("No data in the comparison windows for this selection.")
         else:
             dark_layout(
-                fig_cmp, title="Sales History (36m) vs forecast vintages (24m)",
-                xaxis_title="Months", yaxis_title="Demand volume in kgs",
-                height=430,
-                legend=dict(orientation="h", y=-0.28, x=0.5, xanchor="center",
-                            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-                margin=dict(t=60, l=60, r=30, b=110),
+                fig_cmp, title="Sales history and forecast vintages",
+                xaxis_title=None, yaxis_title="Demand (kg)", height=430,
+                margin=dict(t=72, l=64, r=24, b=40),
             )
-            st.plotly_chart(fig_cmp, width="stretch",
-                            config={"displaylogo": False})
+            fig_cmp.update_yaxes(tickformat="~s")
+            show_chart(fig_cmp)
 
     # ---- Top 25 exception Keys ---------------------------------------------
-    st.markdown("### 🎯 Top 25 Keys by Absolute STF Variance")
+    st.markdown("### Top 25 Keys by absolute variance")
     top25 = var_df.head(25)
     if n_exceptions == 0:
         st.success(f"No Keys exceed the {threshold_pct}% threshold in this "
-                   "horizon — the table below shows the largest movers. 🎉")
+                   "horizon — the table below shows the largest movers.")
     else:
         st.caption(
-            f"**{n_exceptions}** Key(s) exceed the {threshold_pct}% threshold. "
-            "Cells above the threshold are highlighted; the table is sorted "
-            "worst-first, so the top rows are the Keys to review."
+            f"{n_exceptions:,} Keys exceed the {threshold_pct}% threshold; "
+            "variances above it are highlighted. Sorted largest first."
         )
     show = top25.copy()
     show["STF Variance"] = show["STF Variance"] * 100
@@ -2696,18 +3105,22 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
     thr_display = threshold * 100.0
 
     def _thr_highlight(col: pd.Series) -> list:
-        return ["background-color: #ff8fa3; color: #0e1117; font-weight: 600;"
+        return ["background-color: rgba(230, 103, 103, 0.22); color: #ffd6d6;"
                 if float(v) > thr_display else "" for v in col]
 
+    show_disp = show[disp_cols].rename(columns={
+        "CurrentSTF": "Current STF (kg)", "Lag1STF": "Prior STF (kg)",
+        "STF Variance": "Variance", "Absolute STF Variance": "Abs. variance",
+        "Arkieva Active Status": "Active Status"})
     st.dataframe(
-        show[disp_cols].style.format({
-            "CurrentSTF": "{:,.0f}", "Lag1STF": "{:,.0f}",
-            "STF Variance": "{:+.1f}%", "Absolute STF Variance": "{:.1f}%",
-        }).apply(_thr_highlight, subset=["Absolute STF Variance"]),
-        width="stretch", hide_index=True, height=380,
+        show_disp.style.format({
+            "Current STF (kg)": "{:,.0f}", "Prior STF (kg)": "{:,.0f}",
+            "Variance": "{:+.1f}%", "Abs. variance": "{:.1f}%",
+        }).apply(_thr_highlight, subset=["Abs. variance"]),
+        width="stretch", hide_index=True, height=400,
     )
     csv = top25.to_csv(index=False)
-    st.download_button("⬇️ Download top variation Keys (CSV)", data=csv,
+    st.download_button("Download top variation Keys (CSV)", data=csv,
                        file_name="stf_exception_keys.csv", mime="text/csv",
                        key="stf::dl_keys")
 
@@ -2715,12 +3128,13 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
     exceptions = var_df[var_df["Absolute STF Variance"] > threshold].head(25)
     month_pool = exceptions if not exceptions.empty else top25
     if not month_pool.empty:
-        st.markdown("### 🗓️ Which months drive the variation?")
-        st.caption("Month-level STF Variance. Red = larger swing; the "
-                   "strongest cells are the months to investigate.")
+        st.markdown("### Which months drive the variation")
+        st.caption("Variance by month. Red is a higher forecast than the "
+                   "prior cycle, blue lower; the colour scale stops at ±100%. "
+                   "Empty cells had no prior-cycle forecast that month.")
         month_options = ["(Top 10 exception Keys)"] + month_pool["Key"].tolist()
-        month_scope = st.selectbox("Month-variation scope", month_options,
-                                   index=0, key="stf::month_key")
+        month_scope = sticky_selectbox("Month-variation scope", month_options,
+                                       key="stf::month_key")
         if month_scope.startswith("(Top 10"):
             mv_keys = tuple(month_pool["Key"].head(10).tolist())
         else:
@@ -2734,29 +3148,30 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
             z = (heat.values * 100)
             fig_hm = go.Figure(go.Heatmap(
                 z=z, x=list(heat.columns), y=list(heat.index),
-                colorscale="RdBu", zmid=0,
-                hovertemplate="%{y}<br>%{x}<br>Variance: %{z:.1f}%<extra></extra>",
-                colorbar=dict(title="%"),
+                colorscale=DIVERGING_BLUE_RED, zmin=-100, zmax=100, zmid=0,
+                hovertemplate="%{y}<br>%{x}: %{z:+.1f}%<extra></extra>",
+                colorbar=dict(ticksuffix="%", tickvals=[-100, -50, 0, 50, 100],
+                              ticktext=["≤−100", "−50", "0", "+50", "≥+100"],
+                              len=0.9),
             ))
             dark_layout(
-                fig_hm, title="", xaxis_title="Month", yaxis_title="Key",
-                height=max(240, 26 * len(mv_keys) + 140),
-                margin=dict(t=20, l=200, r=30, b=60),
+                fig_hm, title="Month level variance", xaxis_title=None,
+                yaxis_title=None, height=max(240, 30 * len(mv_keys) + 110),
+                hovermode="closest", margin=dict(t=16, l=8, r=24, b=56),
             )
-            fig_hm.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig_hm, width="stretch",
-                            config={"displaylogo": False})
+            fig_hm.update_xaxes(showspikes=False, showline=False, ticks="",
+                                tickangle=-45)
+            fig_hm.update_yaxes(autorange="reversed", showgrid=False,
+                                automargin=True, showspikes=False)
+            show_chart(fig_hm)
 
     # ---- Top 25 Materials by change split ----------------------------------
-    st.markdown("### 🧱 Top 25 Materials — STF change split")
+    st.markdown("### Top 25 Materials: what kind of change moved the forecast")
     st.caption(
-        "Top 25 Materials by **absolute STF deviation** (Current − prior "
-        "committed) over the horizon, each split into the change buckets "
-        "**No Changes**, **Status Change**, **Pattern Change**, and **Status "
-        "& Pattern Change**. Classification is at the unique-key grain "
-        "(Business Line + Material + Ship To Sub Region + Active Status + "
-        "Pattern), flagged by whether status and/or pattern changed vs the "
-        "prior cycle. Reacts to the filters above."
+        "Materials ranked by absolute forecast change (current − prior cycle) "
+        "over the horizon. Each bar is split by whether the forecast line's "
+        "Arkieva Active Status and/or Pattern changed since the prior cycle; "
+        "grey is change with no status or pattern change."
     )
     mat_long, mat_wide = compute_stf_material_changes(
         filtered, tuple(horizon_months), top_n=25)
@@ -2764,14 +3179,13 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
     if mat_long.empty:
         st.info("No material STF deviation available for this selection.")
     else:
-        bucket_colors = {
-            STF_BUCKET_NONE: "#1f4e8c",       # deep blue
-            STF_BUCKET_PATTERN: "#51cf66",    # green
-            STF_BUCKET_STATUS: "#22b8cf",     # cyan
-            STF_BUCKET_BOTH: "#ae3ec9",       # purple
-        }
-        # Order materials top→bottom by absolute deviation (largest on top).
+        bucket_colors = CHANGE_BUCKET_COLORS
+        # mat_wide is ranked largest first. Plotly draws the first category
+        # at the BOTTOM, so the category array is reversed to put the largest
+        # material at the top (no extra autorange reversal).
         mat_order = mat_wide["Material"].tolist()
+        labels = {m: material_label(m) for m in mat_order}
+        totals = mat_wide.set_index("Material")["Total abs deviation"]
         fig_mat = go.Figure()
         for bucket in STF_BUCKET_ORDER:
             seg = mat_long[mat_long["Bucket"] == bucket]
@@ -2779,49 +3193,65 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
                 continue
             seg = seg.set_index("Material").reindex(mat_order).reset_index()
             fig_mat.add_trace(go.Bar(
-                y=seg["Material"], x=seg["AbsDelta"].fillna(0),
+                y=[labels[m] for m in seg["Material"]],
+                x=seg["AbsDelta"].fillna(0),
                 name=bucket, orientation="h",
-                marker=dict(color=bucket_colors[bucket]),
+                marker=dict(color=bucket_colors[bucket],
+                            line=dict(color=INK_PLANE, width=1.5)),
                 customdata=np.stack([seg["Delta"].fillna(0)], axis=-1),
-                hovertemplate=("%{y}<br>" + bucket +
-                               "<br>Abs deviation: %{x:,.0f} kg"
-                               "<br>Net: %{customdata[0]:,.0f} kg<extra></extra>"),
+                hovertemplate=(bucket + ": %{x:,.0f} kg"
+                               " (net %{customdata[0]:+,.0f} kg)<extra></extra>"),
             ))
+        # Direct label: each material's total at the end of its bar.
+        fig_mat.add_trace(go.Scatter(
+            y=[labels[m] for m in mat_order],
+            x=[float(totals[m]) for m in mat_order],
+            mode="text", text=[format_kg(totals[m]).replace(" kg", "")
+                               for m in mat_order],
+            textposition="middle right", textfont=dict(size=11, color=TEXT_SECONDARY),
+            showlegend=False, hoverinfo="skip", cliponaxis=False,
+        ))
         dark_layout(
-            fig_mat, title="Top 25 Materials (by absolute STF deviation)",
-            xaxis_title="Absolute STF deviation (kg)", yaxis_title="",
-            height=760,
-            legend=dict(orientation="h", y=1.04, x=0.5, xanchor="center",
-                        bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-            margin=dict(t=70, l=260, r=30, b=60),
+            fig_mat, title="Top 25 materials by absolute STF change",
+            xaxis_title="Absolute change in committed statistical forecast (kg)",
+            yaxis_title=None, height=40 + 28 * len(mat_order) + 90,
+            hovermode="y unified", margin=dict(t=56, l=8, r=56, b=48),
         )
-        fig_mat.update_layout(barmode="stack")
-        # Largest at top: reverse the category axis (Plotly puts first at bottom).
-        fig_mat.update_yaxes(autorange="reversed",
-                             categoryorder="array",
-                             categoryarray=list(reversed(mat_order)))
-        st.plotly_chart(fig_mat, width="stretch",
-                        config={"displaylogo": False})
+        fig_mat.update_layout(barmode="stack", bargap=0.35)
+        fig_mat.update_yaxes(categoryorder="array",
+                             categoryarray=[labels[m] for m in reversed(mat_order)],
+                             showgrid=False, automargin=True, showspikes=False,
+                             tickfont=dict(color=TEXT_SECONDARY))
+        fig_mat.update_xaxes(tickformat="~s", showgrid=True, gridcolor=INK_GRID,
+                             showline=False, showspikes=False)
+        show_chart(fig_mat)
 
         # ---- Table: absolute (kg) and % split per material -----------------
-        st.markdown("#### Change split by Material (kg and %)")
-        show = mat_wide.copy()
-        abs_cols = [b for b in STF_BUCKET_ORDER]
-        pct_cols = [f"{b} %" for b in STF_BUCKET_ORDER]
-        rename = {}
+        st.markdown("#### Change split by material")
+        disp = mat_wide.copy()
+        kg_cols = list(STF_BUCKET_ORDER) + ["Net delta", "Total abs deviation"]
+        disp[[c for c in kg_cols if c in disp.columns]] = (
+            disp[[c for c in kg_cols if c in disp.columns]].round(0))
+        disp.insert(0, "Material ", disp["Material"].map(material_label))
+        disp = disp.drop(columns=["Material"])
+        col_cfg = {"Material ": st.column_config.TextColumn("Material", width="large")}
         for b in STF_BUCKET_ORDER:
-            rename[b] = f"{b} (kg)"
-        disp = show[["Material"] + abs_cols + ["Net delta",
-                     "Total abs deviation"] + pct_cols].rename(columns=rename)
-        fmt = {f"{b} (kg)": "{:,.0f}" for b in STF_BUCKET_ORDER}
-        fmt["Net delta"] = "{:,.0f}"
-        fmt["Total abs deviation"] = "{:,.0f}"
-        for pc in pct_cols:
-            fmt[pc] = "{:.1f}%"
-        st.dataframe(disp.style.format(fmt), width="stretch",
+            col_cfg[b] = st.column_config.NumberColumn(f"{b} (kg)", format="localized")
+            col_cfg[f"{b} %"] = st.column_config.NumberColumn(
+                f"{b} %", format="%.1f%%",
+                help="Share of the material's total absolute change")
+        col_cfg["Net delta"] = st.column_config.NumberColumn(
+            "Net change (kg)", format="localized")
+        col_cfg["Total abs deviation"] = st.column_config.NumberColumn(
+            "Absolute change (kg)", format="localized")
+        order = (["Material "] + list(STF_BUCKET_ORDER)
+                 + ["Net delta", "Total abs deviation"]
+                 + [f"{b} %" for b in STF_BUCKET_ORDER])
+        st.dataframe(disp[[c for c in order if c in disp.columns]],
+                     column_config=col_cfg, width="stretch",
                      hide_index=True, height=420)
         st.download_button(
-            "⬇️ Download material change split (CSV)",
+            "Download material change split (CSV)",
             data=mat_wide.to_csv(index=False),
             file_name="stf_material_change_split.csv", mime="text/csv",
             key="stf::dl_materials")
@@ -2830,26 +3260,24 @@ def render_stf_variation_tab(long_df: pd.DataFrame,
 # ---------------------------------------------------------------------------
 # UI – Tab 1: Forecast vs Actuals
 # ---------------------------------------------------------------------------
+@st.fragment
 def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
-    st.subheader("📈 Forecast v/s Actuals")
-    detected_month = extract_month_from_filename(file_name)
-    meta_bits = [f"**File:** `{file_name}`"]
-    if detected_month:
-        meta_bits.append(f"**Reporting month:** {detected_month}")
-    st.caption(" • ".join(meta_bits))
+    st.markdown(
+        '<div class="fva-tab-intro">'
+        'Sales history and history for forecast across the whole timeline; forecast lines from the last actual month onward. Use the legend to show or hide lines.'
+        "</div>", unsafe_allow_html=True)
 
     # ---- Filter strip on top -----------------------------------------------
-    with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
-                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
-        selections = render_filter_strip(
-            long_df, FILTER_COLUMNS, key_prefix="dash",
-            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
+    selections = filter_panel(
+        long_df, FILTER_COLUMNS, key_prefix="dash",
+        default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
-        min_d = long_df["Date"].min().to_pydatetime()
-        max_d = long_df["Date"].max().to_pydatetime()
+    min_d = long_df["Date"].min().to_pydatetime()
+    max_d = long_df["Date"].max().to_pydatetime()
+    range_col, _ = st.columns([2, 3])
+    with range_col:
         st.slider(
-            "📅 Date range",
+            "Months shown",
             min_value=min_d, max_value=max_d, value=(min_d, max_d),
             format="MMM YYYY", key="dash::date_range",
         )
@@ -2860,53 +3288,46 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
     filtered = apply_filters(long_df, selections)
     filtered = filtered[(filtered["Date"] >= d_start) & (filtered["Date"] <= d_end)]
 
-    st.caption(f"Rows after filter: **{len(filtered):,}**")
-
     if filtered.empty:
         st.warning("No data matches the current filter combination.")
         return
 
     # ---- KPI cards ----------------------------------------------------------
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Unique Keys", f"{filtered['Key'].nunique():,}")
-    c2.metric("Materials", f"{filtered['Material'].nunique():,}")
-    c3.metric("Months", f"{filtered['Date'].nunique():,}")
-    c4.metric("Total volume (kg)", f"{filtered['Value'].sum(skipna=True):,.0f}")
-
-    # ---- History / Forecast banner -----------------------------------------
     boundary = history_forecast_boundary(filtered)
-    bcol1, bcol2 = st.columns(2)
-    bcol1.markdown(
-        "<div style='background:rgba(77,163,255,0.12); padding:10px 14px;"
-        " border-left:4px solid #4da3ff; border-radius:4px;'>"
-        "<b style='color:#e6edf3;'>📘 History</b><br>"
-        "<span style='font-size:0.85em; color:#9aa4b2;'>"
-        "Solid lines · Sales History, History For Forecast"
-        "</span></div>",
-        unsafe_allow_html=True,
-    )
-    bcol2.markdown(
-        "<div style='background:rgba(255,169,77,0.12); padding:10px 14px;"
-        " border-left:4px solid #ffa94d; border-radius:4px;'>"
-        "<b style='color:#e6edf3;'>📕 Forecast</b><br>"
-        "<span style='font-size:0.85em; color:#9aa4b2;'>"
-        "Solid lines · Statistical Forecast, Final Demand Plan Lag 1"
-        "</span></div>",
-        unsafe_allow_html=True,
-    )
+    sales_last12 = fcst_next12 = None
     if boundary is not None:
-        st.caption(
-            f"History / Forecast boundary detected at "
-            f"**{boundary.strftime('%b %Y')}** "
-            "(last month with Sales History data)."
-        )
+        b0 = pd.Timestamp(boundary)
+        sh = filtered[(filtered["Data"] == SALES_HISTORY_LABEL)
+                      & (filtered["Date"] > b0 - pd.DateOffset(months=12))
+                      & (filtered["Date"] <= b0)]
+        sales_last12 = float(sh["Value"].sum(skipna=True))
+        fc = filtered[(filtered["Data"] == STAT_FORECAST_LABEL)
+                      & (filtered["Date"] > b0)
+                      & (filtered["Date"] <= b0 + pd.DateOffset(months=12))]
+        fcst_next12 = float(fc["Value"].sum(skipna=True))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Keys", f"{filtered['Key'].nunique():,}")
+    c2.metric("Materials", f"{filtered['Material'].nunique():,}")
+    c3.metric("Sales history, last 12 months",
+              "–" if sales_last12 is None else format_kg(sales_last12),
+              help="Sum of Sales History (kg) over the 12 months up to the "
+                   "last actual month.")
+    if fcst_next12 is not None and sales_last12:
+        delta = (fcst_next12 - sales_last12) / sales_last12 * 100
+        c4.metric("Statistical forecast, next 12 months", format_kg(fcst_next12),
+                  delta=f"{delta:+.1f}% vs last 12 months", delta_color="off",
+                  help="Sum of the Statistical Forecast (kg) over the 12 "
+                       "months after the last actual month.")
+    else:
+        c4.metric("Statistical forecast, next 12 months",
+                  "–" if fcst_next12 is None else format_kg(fcst_next12))
 
     # ---- Trend toggle -------------------------------------------------------
-    show_trend = st.checkbox(
-        "📈 Show trend lines (history & forecast)", value=True,
+    show_trend = st.toggle(
+        "Show trend lines", value=True,
         key="dash::show_trend",
-        help="Fits a linear trend separately to the history and forecast "
-             "periods so you can see whether the forecast follows the "
+        help="Fits a straight-line trend separately to the history and "
+             "forecast periods, to show whether the forecast follows the "
              "historical trajectory.",
     )
 
@@ -2919,61 +3340,26 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
     )
 
     fig = go.Figure()
-
-    # Background bands for History / Forecast regions
     if boundary is not None and len(pivot.index) > 0:
-        x_min = pivot.index.min()
-        x_max = pivot.index.max()
-        if x_min <= boundary:
-            fig.add_vrect(
-                x0=x_min, x1=boundary,
-                fillcolor=HISTORY_BAND_COLOR, line_width=0, layer="below",
-                annotation_text="History", annotation_position="top left",
-                annotation_font=dict(color="#4da3ff", size=12),
-            )
-        if x_max >= boundary:
-            fig.add_vrect(
-                x0=boundary, x1=x_max,
-                fillcolor=FORECAST_BAND_COLOR, line_width=0, layer="below",
-                annotation_text="Forecast", annotation_position="top right",
-                annotation_font=dict(color="#ffa94d", size=12),
-            )
-        fig.add_vline(x=boundary, line=dict(color=DARK_MUTED, width=1, dash="dot"))
+        add_cycle_marks(fig, boundary, pivot.index.max())
 
-    # One trace per Data series — all SOLID (Change 3), distinguished by colour.
-    # History series run across BOTH periods; Forecast series (Statistical
+    # History series run across BOTH periods; forecast series (Statistical
     # Forecast Committed, its prior-cycle line, Final Demand Plan Lag 1) are
-    # clipped to the Forecast period only (dates after the boundary), so the
-    # History band stays clean for reading actual sales, seasonality and
-    # outliers.
+    # drawn only after the last actual month, so the history period stays
+    # clean for reading actual sales, seasonality and outliers.
     ordered = [s for s in HISTORY_SERIES + FORECAST_SERIES if s in pivot.columns]
     for col in ordered:
         style = SERIES_STYLE.get(
-            col, {"color": "#888", "dash": "solid", "category": "Other"}
+            col, {"color": TEXT_MUTED, "dash": "solid", "category": "Other"}
         )
         y_vals = pivot[col]
-        if style["category"] == "Forecast" and boundary is not None:
-            # Hide forecast lines in the History period.
-            y_vals = y_vals.where(pivot.index > boundary)
-        fig.add_trace(
-            go.Scatter(
-                x=pivot.index, y=y_vals,
-                name=col, mode="lines+markers",
-                line=dict(color=style["color"], width=2.6, dash="solid",
-                          shape="spline", smoothing=0.5),
-                marker=dict(size=6,
-                            symbol="circle" if style["category"] == "History" else "diamond"),
-                legendgroup=style["category"],
-                legendgrouptitle_text=style["category"],
-                hovertemplate=(
-                    f"<b>{col}</b><br>"
-                    f"<i>{style['category']}</i><br>"
-                    "%{x|%b %Y}<br>Volume: %{y:,.0f} kg<extra></extra>"
-                ),
-            )
-        )
+        if style["category"] == "Forecast":
+            if boundary is not None:
+                y_vals = y_vals.where(pivot.index > boundary)
+            y_vals = mask_trailing_zeros(y_vals)
+        fig.add_trace(time_series_trace(pivot.index, y_vals, col, style))
 
-    # ---- Trend lines (Change 4) --------------------------------------------
+    # ---- Trend lines -------------------------------------------------------
     hist_trend = fcst_trend = None
     if boundary is not None:
         sales_series = (filtered[filtered["Data"] == SALES_HISTORY_LABEL]
@@ -2990,42 +3376,30 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
 
     if show_trend:
         if hist_trend is not None:
-            fig.add_trace(go.Scatter(
-                x=hist_trend["dates"], y=hist_trend["fit_line"],
-                mode="lines", name="History trend",
-                line=dict(color=HISTORY_TREND_COLOR, width=2.4, dash="dash"),
-                legendgroup="Trend", legendgrouptitle_text="Trend",
-                hovertemplate="History trend<br>%{x|%b %Y}<br>%{y:,.0f} kg<extra></extra>",
-            ))
+            fig.add_trace(trend_trace(hist_trend, "Sales history trend",
+                                      HISTORY_TREND_COLOR))
         if fcst_trend is not None:
-            fig.add_trace(go.Scatter(
-                x=fcst_trend["dates"], y=fcst_trend["fit_line"],
-                mode="lines", name="Forecast trend",
-                line=dict(color=FORECAST_TREND_COLOR, width=2.4, dash="dash"),
-                legendgroup="Trend", legendgrouptitle_text="Trend",
-                hovertemplate="Forecast trend<br>%{x|%b %Y}<br>%{y:,.0f} kg<extra></extra>",
-            ))
+            fig.add_trace(trend_trace(fcst_trend, "Statistical forecast trend",
+                                      FORECAST_TREND_COLOR))
 
     dark_layout(
         fig,
-        title="Forecast v/s Actuals",
-        xaxis_title="Months", yaxis_title="Demand volume in kgs",
-        height=560,
-        legend=dict(
-            orientation="h", yanchor="top", y=-0.36,
-            xanchor="center", x=0.5, groupclick="toggleitem",
-            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT),
-        ),
-        margin=dict(t=70, l=60, r=30, b=150),
+        title="Forecast vs actuals",
+        xaxis_title=None, yaxis_title="Demand (kg)",
+        height=540,
+        legend=dict(groupclick="toggleitem"),
+        margin=dict(t=88, l=64, r=24, b=40),
     )
+    fig.update_layout(legend=dict(y=1.14), margin=dict(t=104))
     add_time_controls(fig)
+    fig.update_yaxes(tickformat="~s")
 
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
+    show_chart(fig)
 
     # ---- Trend interpretation ----------------------------------------------
     if show_trend:
         status, message = interpret_trend(hist_trend, fcst_trend)
-        st.markdown("#### 🧭 Trend interpretation")
+        st.markdown("#### What the trend says")
         if status == "ok":
             st.success(message)
         elif status == "warn":
@@ -3037,14 +3411,12 @@ def render_dashboard_tab(long_df: pd.DataFrame, file_name: str) -> None:
 # ---------------------------------------------------------------------------
 # UI – Tab 2: Outlier Detection & Correction (Hampel filter)
 # ---------------------------------------------------------------------------
+@st.fragment
 def render_outlier_tab(long_df: pd.DataFrame) -> None:
-    st.subheader("🚨 Outlier Detection & Correction")
-    st.caption(
-        "Detect and **correct** outliers on **Sales History (kg)**. Choose a "
-        "method below. Both the original history and the cleansed history "
-        "(after correction) are shown. *History For Forecast (kg)* is shown "
-        "unchanged for comparison."
-    )
+    st.markdown(
+        '<div class="fva-tab-intro">'
+        "Find and correct outliers in Sales History with the IQR or Sigma method. Each Key's chart shows the original and the cleansed history, with History For Forecast unchanged for comparison."
+        "</div>", unsafe_allow_html=True)
 
     sales = long_df[long_df["Data"] == SALES_HISTORY_LABEL].copy()
     if sales.empty:
@@ -3056,23 +3428,27 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     # 'Data' filter is omitted: this view is intrinsically Sales History.
     outlier_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
 
-    with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
-                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
-        selections = render_filter_strip(
-            sales, outlier_filter_cols, key_prefix="outlier",
-            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES},
-        )
+    selections = filter_panel(
+        sales, outlier_filter_cols, key_prefix="outlier",
+        default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     sales_f = apply_filters(sales, selections)
     if sales_f.empty:
         st.warning("No Sales History rows match the current filter combination.")
         return
 
-    st.caption(
-        f"Rows after filter: **{len(sales_f):,}** "
-        f"covering **{sales_f['Key'].nunique():,}** Keys"
-    )
+    # Detect on actual history only. Sales History is exported as zeros for
+    # future months; including them dragged the IQR quartiles and the median
+    # correction toward zero and flagged ordinary sales as outliers.
+    last_actual = history_forecast_boundary(sales_f)
+    if last_actual is not None:
+        sales_f = sales_f[sales_f["Date"] <= last_actual]
+        hist_ff = hist_ff[hist_ff["Date"] <= last_actual]
+        st.caption(
+            f"Detecting on {sales_f['Key'].nunique():,} Keys, using actual "
+            f"history up to {pd.Timestamp(last_actual):%b %Y} (future months, "
+            "exported as zero, are excluded)."
+        )
 
     # ---- Method selection (Change 2) ---------------------------------------
     mcol, pcol = st.columns([1, 1.3])
@@ -3128,14 +3504,15 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     total_keys = all_results["Key"].nunique()
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Keys analysed", f"{total_keys:,}")
-    m2.metric("Keys with ≥1 outlier", f"{keys_with_outliers:,}")
-    m3.metric("Total observations", f"{total_pts:,}")
+    m1.metric("Keys checked", f"{total_keys:,}")
+    m2.metric("Keys with an outlier", f"{keys_with_outliers:,}")
+    m3.metric("Months checked", f"{total_pts:,}")
     rate = (total_outliers / total_pts * 100) if total_pts else 0
-    m4.metric("Outliers corrected", f"{total_outliers:,}", delta=f"{rate:.1f}% of points")
+    m4.metric("Outliers corrected", f"{total_outliers:,}",
+              delta=f"{rate:.1f}% of months", delta_color="off")
 
     # ---- Per-Key chooser ----------------------------------------------------
-    st.markdown("### 🔬 Inspect a single Key")
+    st.markdown("### Inspect a single Key")
     keys_sorted = sorted(all_results["Key"].unique().tolist())
     keys_with_out_set = set(all_results.loc[all_results["IsOutlier"], "Key"].unique())
     only_with_out = st.checkbox(
@@ -3151,8 +3528,8 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     if not key_options:
         st.info("No Keys match the current selection.")
     else:
-        chosen_key = st.selectbox("Select a Key", key_options, index=0,
-                                  key="outlier::chosen_key")
+        chosen_key = sticky_selectbox("Select a Key", key_options,
+                                      key="outlier::chosen_key")
         key_df = all_results[all_results["Key"] == chosen_key].sort_values("Date")
         hff_key = hist_ff[hist_ff["Key"] == chosen_key].sort_values("Date") \
             if not hist_ff.empty else pd.DataFrame(columns=["Date", "Value"])
@@ -3169,7 +3546,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         cbuf = io.StringIO()
         cleansed.to_csv(cbuf, index=False)
         st.download_button(
-            "⬇️ Download this Key's cleansed history (CSV)",
+            "Download this Key's cleansed history (CSV)",
             data=cbuf.getvalue(),
             file_name=f"cleansed_{method.lower()}_{chosen_key}.csv",
             mime="text/csv",
@@ -3177,10 +3554,10 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         )
 
     # ---- Full outlier listing -----------------------------------------------
-    st.markdown("### 📋 All flagged & corrected outliers")
+    st.markdown("### All corrected outliers")
     outlier_df = all_results[all_results["IsOutlier"]].copy()
     if outlier_df.empty:
-        st.success("No outliers detected with the current settings. 🎉")
+        st.success("No outliers detected with the current settings.")
     else:
         meta = (sales_f.drop_duplicates(subset=["Key"])
                 [["Key", "Business Line", "Material", "Ship To Sub Region",
@@ -3200,12 +3577,12 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
             {c: "{:,.2f}" for c in
              ["Original", "Corrected", "Center", "Lower", "Upper"]},
             na_rep="–",
-            width="stretch",
+            width="stretch", hide_index=True,
         )
         buf = io.StringIO()
         outlier_df[cols].to_csv(buf, index=False)
         st.download_button(
-            "⬇️ Download all corrected outliers (CSV)",
+            "Download all corrected outliers (CSV)",
             data=buf.getvalue(),
             file_name=f"corrected_outliers_{method.lower()}.csv",
             mime="text/csv",
@@ -3213,7 +3590,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
         )
 
     # ---- Full cleansed-history export (all Keys) ----------------------------
-    st.markdown("### 🧼 Cleansed history export")
+    st.markdown("### Cleansed history export")
     st.caption(
         "The full cleansed Sales History for every Key in the current filter "
         "selection — outliers replaced by the method's central estimate, all "
@@ -3228,7 +3605,7 @@ def render_outlier_tab(long_df: pd.DataFrame) -> None:
     fbuf = io.StringIO()
     full_clean.to_csv(fbuf, index=False)
     st.download_button(
-        "⬇️ Download full cleansed history — all Keys (CSV)",
+        "Download cleansed history for all Keys (CSV)",
         data=fbuf.getvalue(),
         file_name=f"cleansed_history_all_keys_{method.lower()}.csv",
         mime="text/csv",
@@ -3245,112 +3622,79 @@ def _render_key_chart(
 ) -> None:
     fig = go.Figure()
 
-    # Threshold band (center ± bound)
+    # Normal range between the method's lower and upper bounds (one legend item).
     bounds_df = key_df.dropna(subset=["Lower", "Upper"]).sort_values("Date")
     if not bounds_df.empty:
         fig.add_trace(go.Scatter(
-            x=bounds_df["Date"], y=bounds_df["Upper"],
-            mode="lines", name="Upper bound",
-            line=dict(color="rgba(154,164,178,0.5)", width=1, dash="dot"),
-            hovertemplate="Upper: %{y:,.2f}<extra></extra>",
+            x=bounds_df["Date"], y=bounds_df["Upper"], mode="lines",
+            line=dict(width=0), showlegend=False, legendgroup="band",
+            hovertemplate="Upper bound %{y:,.0f} kg<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
-            x=bounds_df["Date"], y=bounds_df["Lower"],
-            mode="lines", name="Lower bound",
-            line=dict(color="rgba(154,164,178,0.5)", width=1, dash="dot"),
-            fill="tonexty", fillcolor="rgba(154,164,178,0.10)",
-            hovertemplate="Lower: %{y:,.2f}<extra></extra>",
+            x=bounds_df["Date"], y=bounds_df["Lower"], mode="lines",
+            line=dict(width=0), fill="tonexty",
+            fillcolor="rgba(167, 177, 189, 0.10)",
+            name="Normal range", legendgroup="band",
+            hovertemplate="Lower bound %{y:,.0f} kg<extra></extra>",
         ))
 
-    # Original Sales History (solid)
-    fig.add_trace(go.Scatter(
-        x=key_df["Date"], y=key_df["Value"],
-        mode="lines+markers", name="Sales History (original)",
-        line=dict(color=SERIES_STYLE[SALES_HISTORY_LABEL]["color"], width=2.4,
-                  shape="spline", smoothing=0.5),
-        marker=dict(size=6),
-        hovertemplate="<b>Sales History</b><br>%{x|%b %Y}"
-                      "<br>Value: %{y:,.2f} kg<extra></extra>",
-    ))
-
-    # Cleansed history (solid, distinct colour)
-    fig.add_trace(go.Scatter(
-        x=key_df["Date"], y=key_df["Filtered"],
-        mode="lines+markers", name="Cleansed history (corrected)",
-        line=dict(color="#51cf66", width=2.4, shape="spline", smoothing=0.5),
-        marker=dict(size=5, symbol="square"),
-        hovertemplate="<b>Cleansed</b><br>%{x|%b %Y}"
-                      "<br>Value: %{y:,.2f} kg<extra></extra>",
-    ))
-
-    # History For Forecast (kept as-is) — only if available
     if hff_df is not None and not hff_df.empty:
-        fig.add_trace(go.Scatter(
-            x=hff_df["Date"], y=hff_df["Value"],
-            mode="lines", name="History For Forecast (unchanged)",
+        fig.add_trace(time_series_trace(
+            hff_df["Date"], hff_df["Value"], HISTORY_FOR_FORECAST_LABEL,
+            SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL],
+            name="History for forecast (unchanged)", legend_group=False,
             line=dict(color=SERIES_STYLE[HISTORY_FOR_FORECAST_LABEL]["color"],
-                      width=1.8),
-            hovertemplate="<b>History For Forecast</b><br>%{x|%b %Y}"
-                          "<br>Value: %{y:,.2f} kg<extra></extra>",
-        ))
+                      width=1.5), mode="lines"))
+    fig.add_trace(time_series_trace(
+        key_df["Date"], key_df["Value"], SALES_HISTORY_LABEL,
+        SERIES_STYLE[SALES_HISTORY_LABEL], name="Sales history (original)",
+        legend_group=False))
+    fig.add_trace(time_series_trace(
+        key_df["Date"], key_df["Filtered"], "Cleansed",
+        {"color": CLEANSED_COLOR, "category": "History"},
+        name="Cleansed history", legend_group=False,
+        line=dict(color=CLEANSED_COLOR, width=2, dash="dot"),
+        marker=dict(size=5, color=CLEANSED_COLOR, symbol="square")))
 
-    # Outlier markers (on the original series)
     out_df = key_df[key_df["IsOutlier"]]
     if not out_df.empty:
         fig.add_trace(go.Scatter(
-            x=out_df["Date"], y=out_df["Value"],
-            mode="markers", name="Outlier (corrected)",
-            marker=dict(color="#ff6b6b", size=13, symbol="x-thin",
-                        line=dict(color="#ff6b6b", width=3)),
-            hovertemplate="<b>OUTLIER</b><br>%{x|%b %Y}<br>"
-                          "Value: %{y:,.2f}<extra></extra>",
+            x=out_df["Date"], y=out_df["Value"], mode="markers",
+            name="Outlier (corrected)",
+            marker=dict(size=14, symbol="circle-open", color=TEXT_PRIMARY,
+                        line=dict(width=2)),
+            hovertemplate="%{y:,.0f} kg (outlier)",
         ))
 
-    param_label = f"k = {param}" if method == "IQR" else f"n_sigma = {param}"
+    param_label = f"k {param}" if method == "IQR" else f"n {param}"
     dark_layout(
-        fig,
-        title=f"{key} — {method} method ({param_label})",
-        xaxis_title="Months", yaxis_title="Demand volume in kgs",
-        height=540,
-        legend=dict(orientation="h", yanchor="top", y=-0.32,
-                    xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=DARK_TEXT)),
-        margin=dict(t=70, l=60, r=30, b=150),
+        fig, title=f"{key} {method} {param_label}",
+        xaxis_title=None, yaxis_title="Sales (kg)", height=460,
+        margin=dict(t=56, l=64, r=24, b=40),
     )
-    add_time_controls(fig)
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
+    fig.update_yaxes(tickformat="~s")
+    show_chart(fig)
 
     n_out = int(key_df["IsOutlier"].sum())
-    if n_out:
-        st.warning(
-            f"⚠️ {n_out} outlier observation(s) detected and corrected for this Key."
-        )
-    else:
-        st.success("✅ No outliers detected for this Key.")
+    st.caption(f"{n_out} month(s) flagged and corrected for this Key."
+               if n_out else "No months flagged for this Key.")
 
 
 # ---------------------------------------------------------------------------
 # UI – Tab 3: Year-over-Year Seasonality (Change 4)
 # ---------------------------------------------------------------------------
+@st.fragment
 def render_seasonality_tab(long_df: pd.DataFrame) -> None:
-    st.subheader("📅 Year-over-Year Seasonality")
-    st.caption(
-        "Compare the **monthly seasonal shape** of the last 3 historical "
-        "years of Sales History against the forecast period. Each line is a "
-        "seasonal index: a value of 1.10 means that month runs ~10% above "
-        "that period's average. Use it to check whether the forecast carries "
-        "the same seasonality as recent history."
-    )
+    st.markdown(
+        '<div class="fva-tab-intro">'
+        "Each line is a seasonal index: 1.10 means that month runs about 10% above the period's average. Compare the forecast's monthly shape with the last three years of sales."
+        "</div>", unsafe_allow_html=True)
 
     # ---- Filter strip (same six as the outlier tab) ------------------------
     season_filter_cols = [c for c in FILTER_COLUMNS if c != "Data"]
-    with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
-                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
-        selections = render_filter_strip(
-            long_df, season_filter_cols, key_prefix="season",
-            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES},
-        )
+    selections = filter_panel(
+        long_df, season_filter_cols, key_prefix="season",
+        default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     filtered = apply_filters(long_df, selections)
     if filtered.empty:
@@ -3377,64 +3721,55 @@ def render_seasonality_tab(long_df: pd.DataFrame) -> None:
 
     fig = go.Figure()
 
-    # Per-year historical profiles (thin, muted)
-    year_palette = ["#4dabf7", "#3bc9db", "#9775fa"]
-    for i, (yr, prof) in enumerate(sorted(analysis["per_year"].items())):
-        if prof is None:
-            continue
+    # Individual history years: thin tints of the Sales History blue, older
+    # years fainter. The 3-year average is the solid blue line and the
+    # forecast is the Statistical Forecast orange, as on every other tab.
+    hist_color = SERIES_STYLE[SALES_HISTORY_LABEL]["color"]
+    fcst_color = SERIES_STYLE[STAT_FORECAST_LABEL]["color"]
+    years = [(yr, prof) for yr, prof in sorted(analysis["per_year"].items())
+             if prof is not None]
+    for i, (yr, prof) in enumerate(years):
+        opacity = 0.35 + 0.25 * (i / max(1, len(years) - 1))
         fig.add_trace(go.Scatter(
             x=month_labels, y=prof.reindex(months).values,
-            mode="lines+markers", name=f"History {yr}",
-            line=dict(color=year_palette[i % len(year_palette)], width=1.6),
-            marker=dict(size=5),
-            legendgroup="History",
-            hovertemplate=f"History {yr}<br>%{{x}}<br>Index: %{{y:.2f}}<extra></extra>",
+            mode="lines", name=f"{yr}", opacity=opacity,
+            line=dict(color=hist_color, width=1.25),
+            legendgroup="History", legendgrouptitle_text="History",
+            hovertemplate="%{y:.2f}",
         ))
-
-    # Average historical profile (bold)
     fig.add_trace(go.Scatter(
         x=month_labels, y=analysis["hist_profile"].reindex(months).values,
-        mode="lines+markers", name="History (3-yr avg)",
-        line=dict(color="#4da3ff", width=3.4),
-        marker=dict(size=7),
-        legendgroup="History",
-        hovertemplate="History 3-yr avg<br>%{x}<br>Index: %{y:.2f}<extra></extra>",
+        mode="lines+markers", name="3-year average",
+        line=dict(color=hist_color, width=2.5), marker=dict(size=6),
+        legendgroup="History", legendgrouptitle_text="History",
+        hovertemplate="%{y:.2f}",
     ))
-
-    # Forecast profile (bold, contrasting)
     if analysis["fcst_profile"] is not None:
         fig.add_trace(go.Scatter(
             x=month_labels, y=analysis["fcst_profile"].reindex(months).values,
-            mode="lines+markers", name="Forecast",
-            line=dict(color="#ffa94d", width=3.4),
+            mode="lines+markers", name="Statistical forecast",
+            line=dict(color=fcst_color, width=2.5),
             marker=dict(size=7, symbol="diamond"),
-            legendgroup="Forecast",
-            hovertemplate="Forecast<br>%{x}<br>Index: %{y:.2f}<extra></extra>",
+            legendgroup="Forecast", legendgrouptitle_text="Forecast",
+            hovertemplate="%{y:.2f}",
         ))
-
-    # Reference line at index = 1.0 (the period average)
-    fig.add_hline(y=1.0, line=dict(color=DARK_MUTED, width=1, dash="dot"),
-                  annotation_text="period average",
-                  annotation_font=dict(color=DARK_MUTED, size=11))
+    fig.add_hline(y=1.0, line=dict(color="#3d4a5c", width=1),
+                  annotation_text="Average month = 1.00",
+                  annotation_position="top right",
+                  annotation_font=dict(color=TEXT_MUTED, size=11))
 
     dark_layout(
-        fig,
-        title="Monthly seasonal index — History vs Forecast",
-        xaxis_title="Month", yaxis_title="Seasonal index (1.0 = average)",
-        height=520,
-        legend=dict(orientation="h", yanchor="top", y=-0.28,
-                    xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=DARK_TEXT)),
-        margin=dict(t=70, l=60, r=30, b=120),
+        fig, title="Monthly seasonal index history vs forecast",
+        xaxis_title=None, yaxis_title="Seasonal index",
+        height=460, margin=dict(t=80, l=64, r=24, b=40),
     )
-    # Seasonality x-axis is categorical months — no rangeslider needed.
     fig.update_xaxes(showspikes=True)
     fig.update_yaxes(tickformat=".2f")
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
+    show_chart(fig)
 
     # ---- Interpretation -----------------------------------------------------
     status, message = interpret_seasonality(analysis)
-    st.markdown("#### 🧭 Seasonality interpretation")
+    st.markdown("#### What the seasonality says")
     if status == "ok":
         st.success(message)
     elif status == "warn":
@@ -3454,29 +3789,23 @@ def render_seasonality_tab(long_df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 # UI – Tab: Statistical Forecast Adoption %
 # ---------------------------------------------------------------------------
+@st.fragment
 def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
-    st.subheader("📦 Statistical Forecast Adoption %")
-    st.caption(
-        "Share of Statistical-Forecast volume that is **on** the statistical "
-        "forecast — i.e. the granular Business Line + Material + Ship To Sub "
-        "Region + Active Status combinations with **Arkieva Review Req = No** "
-        "and **Active/Sparse** status — measured against each Ship To Sub "
-        "Region's total forecast, by fiscal year (Jan–Dec)."
-    )
+    st.markdown(
+        '<div class="fva-tab-intro">'
+        "Share of forecast volume running on the statistical forecast: combinations with Arkieva Review Req = No and status Active or Sparse, measured against each Ship To Sub Region's total forecast, per fiscal year (Jan–Dec)."
+        "</div>", unsafe_allow_html=True)
 
     # ---- Filters (same set + Active/Sparse default) ------------------------
-    with st.container(border=True):
-        st.markdown("**🔎 Filters** — cascade like Excel slicers (each narrows the others). "
-                    "*Arkieva Active Status* defaults to **Active + Sparse**; clear or change any filter as needed.")
-        # The Data filter is dropped (the tab is scoped to the Statistical
-        # Forecast internally) and so is Arkieva Review Req — the on-stat
-        # definition already applies Review Req = No, so the filter is
-        # redundant here.
-        adopt_filter_cols = [c for c in FILTER_COLUMNS
-                             if c not in ("Data", REVIEW_REQ_COL)]
-        selections = render_filter_strip(
-            long_df, adopt_filter_cols, key_prefix="adopt",
-            default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
+    # The Data filter is dropped (the tab is scoped to the Statistical
+    # Forecast internally) and so is Arkieva Review Req — the on-stat
+    # definition already applies Review Req = No, so the filter is
+    # redundant here.
+    adopt_filter_cols = [c for c in FILTER_COLUMNS
+                         if c not in ("Data", REVIEW_REQ_COL)]
+    selections = filter_panel(
+        long_df, adopt_filter_cols, key_prefix="adopt",
+        default_selections={ACTIVE_STATUS_COL: DEFAULT_ACTIVE_STATUSES})
 
     filtered = apply_filters(long_df, selections)
     if filtered.empty:
@@ -3505,53 +3834,45 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
     years_covered = sorted(overall["Year"].astype(int).unique())
 
     st.caption(
-        f"**Active year: {active_year}** (last active month in Sales History). "
-        f"Adoption is computed for **{active_year}–{years_covered[-1]}** "
-        "(active year onwards); earlier years are excluded."
+        f"Fiscal years {active_year} to {years_covered[-1]}: {active_year} is "
+        "the year of the last actual month, and earlier years are excluded."
     )
 
     m1, m2, m3 = st.columns(3)
-    m1.metric(f"Overall adoption ({active_year}+)", f"{grand_pct:.1f}%")
-    m2.metric("On-stat forecast (kg)", f"{grand_on:,.0f}")
-    m3.metric("Total forecast (kg)", f"{grand_tot:,.0f}")
+    m1.metric(f"Adoption, {active_year} onward", f"{grand_pct:.1f}%")
+    m2.metric("Forecast on statistical forecast", format_kg(grand_on))
+    m3.metric("Total forecast", format_kg(grand_tot))
 
     # ---- Adoption % by fiscal year (line + bar combo) ----------------------
-    st.markdown("### 📈 Adoption % by fiscal year")
+    st.markdown("### Adoption by fiscal year")
     year_df = overall.copy()
     if not year_df.empty:
         year_df["YearLabel"] = year_df["Year"].astype(int).astype(str)
         fig_year = go.Figure()
         fig_year.add_trace(go.Bar(
             x=year_df["YearLabel"], y=year_df["AdoptionPct"],
-            name="Adoption %", marker=dict(color="#4da3ff"),
+            name="Adoption", marker=dict(color=CATEGORICAL[0], cornerradius=3),
             text=[f"{v:.1f}%" for v in year_df["AdoptionPct"]],
-            textposition="outside",
-            hovertemplate="FY %{x}<br>Adoption: %{y:.1f}%<extra></extra>",
-        ))
-        fig_year.add_trace(go.Scatter(
-            x=year_df["YearLabel"], y=year_df["AdoptionPct"],
-            name="Trend", mode="lines+markers",
-            line=dict(color="#ffa94d", width=2.5),
-            marker=dict(size=7),
-            hovertemplate="FY %{x}<br>%{y:.1f}%<extra></extra>",
+            textposition="outside", cliponaxis=False,
+            textfont=dict(color=TEXT_PRIMARY, size=13),
+            hovertemplate="FY %{x}: %{y:.1f}%<extra></extra>",
         ))
         dark_layout(
-            fig_year, title="Statistical Forecast adoption by fiscal year",
-            xaxis_title="Fiscal year (Jan–Dec)", yaxis_title="Adoption %",
-            height=380,
-            legend=dict(orientation="h", y=-0.25, x=0.5, xanchor="center",
-                        bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-            margin=dict(t=60, l=60, r=30, b=80),
+            fig_year, title="Statistical forecast adoption by fiscal year",
+            xaxis_title="Fiscal year (Jan–Dec)", yaxis_title="Adoption",
+            height=340, showlegend=False, hovermode="closest",
+            margin=dict(t=36, l=64, r=24, b=48), bargap=0.55,
         )
+        fig_year.update_xaxes(showspikes=False, type="category")
         fig_year.update_yaxes(ticksuffix="%", rangemode="tozero")
-        st.plotly_chart(fig_year, width="stretch",
-                        config={"displaylogo": False})
+        show_chart(fig_year)
 
     # ---- By Business Line and by Ship To Sub Region (grouped bars) ----------
     bcol, rcol = st.columns(2)
 
     with bcol:
-        st.markdown("### 🏭 By Business Line")
+        st.markdown("### By Business Line")
+        bl_colors = entity_colors(long_df, "Business Line")
         bl_df = compute_stat_adoption(filtered, group_col="Business Line",
                                       active_year=active_year)
         if bl_df.empty:
@@ -3563,23 +3884,23 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
                 sub = bl_df[bl_df["Business Line"] == bl]
                 fig_bl.add_trace(go.Bar(
                     x=sub["YearLabel"], y=sub["AdoptionPct"], name=str(bl),
-                    hovertemplate=f"<b>{bl}</b><br>FY %{{x}}<br>"
-                                  "%{y:.1f}%<extra></extra>",
+                    marker=dict(color=bl_colors.get(str(bl), TEXT_MUTED),
+                                cornerradius=2),
+                    hovertemplate="%{y:.1f}%",
                 ))
             dark_layout(
-                fig_bl, title="Adoption % by Business Line",
-                xaxis_title="Fiscal year", yaxis_title="Adoption %",
-                height=400, barmode="group",
-                legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center",
-                            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-                margin=dict(t=60, l=50, r=20, b=110),
+                fig_bl, title="Adoption by Business Line",
+                xaxis_title=None, yaxis_title="Adoption",
+                height=380, barmode="group",
+                margin=dict(t=72, l=56, r=16, b=40),
             )
+            fig_bl.update_xaxes(type="category")
             fig_bl.update_yaxes(ticksuffix="%", rangemode="tozero")
-            st.plotly_chart(fig_bl, width="stretch",
-                            config={"displaylogo": False})
+            show_chart(fig_bl)
 
     with rcol:
-        st.markdown("### 🌍 By Ship To Sub Region")
+        st.markdown("### By Ship To Sub Region")
+        rg_colors = entity_colors(long_df, "Ship To Sub Region")
         rg_df = compute_stat_adoption(filtered, group_col="Ship To Sub Region",
                                       active_year=active_year)
         if rg_df.empty:
@@ -3591,55 +3912,54 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
                 sub = rg_df[rg_df["Ship To Sub Region"] == rg]
                 fig_rg.add_trace(go.Bar(
                     x=sub["YearLabel"], y=sub["AdoptionPct"], name=str(rg),
-                    hovertemplate=f"<b>{rg}</b><br>FY %{{x}}<br>"
-                                  "%{y:.1f}%<extra></extra>",
+                    marker=dict(color=rg_colors.get(str(rg), TEXT_MUTED),
+                                cornerradius=2),
+                    hovertemplate="%{y:.1f}%",
                 ))
             dark_layout(
-                fig_rg, title="Adoption % by Ship To Sub Region",
-                xaxis_title="Fiscal year", yaxis_title="Adoption %",
-                height=400, barmode="group",
-                legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center",
-                            bgcolor="rgba(0,0,0,0)", font=dict(color=DARK_TEXT)),
-                margin=dict(t=60, l=50, r=20, b=110),
+                fig_rg, title="Adoption by Ship To Sub Region",
+                xaxis_title=None, yaxis_title="Adoption",
+                height=380, barmode="group",
+                margin=dict(t=72, l=56, r=16, b=40),
             )
+            fig_rg.update_xaxes(type="category")
             fig_rg.update_yaxes(ticksuffix="%", rangemode="tozero")
-            st.plotly_chart(fig_rg, width="stretch",
-                            config={"displaylogo": False})
+            show_chart(fig_rg)
 
     # ---- Heatmap: Business Line × Year ------------------------------------
     bl_df_h = compute_stat_adoption(filtered, group_col="Business Line",
                                     active_year=active_year)
     if not bl_df_h.empty and bl_df_h["Business Line"].nunique() > 1:
-        st.markdown("### 🔥 Adoption % heatmap — Business Line × fiscal year")
+        st.markdown("### Adoption by Business Line and fiscal year")
         pivot = bl_df_h.pivot(index="Business Line", columns="Year",
                               values="AdoptionPct").sort_index()
         fig_hm = go.Figure(go.Heatmap(
             z=pivot.values,
             x=[str(int(c)) for c in pivot.columns],
             y=pivot.index.tolist(),
-            colorscale="Blues", zmin=0,
+            colorscale=SEQUENTIAL_BLUE, zmin=0, zmax=100,
             text=[[f"{v:.0f}%" if pd.notna(v) else "" for v in row]
                   for row in pivot.values],
-            texttemplate="%{text}", textfont=dict(color="#0e1117"),
-            hovertemplate="%{y}<br>FY %{x}<br>%{z:.1f}%<extra></extra>",
-            colorbar=dict(title="%"),
+            texttemplate="%{text}", textfont=dict(size=13, color="#ffffff"),
+            hovertemplate="%{y}, FY %{x}: %{z:.1f}%<extra></extra>",
+            colorbar=dict(ticksuffix="%", len=0.9),
         ))
         dark_layout(
-            fig_hm, title="", xaxis_title="Fiscal year",
-            yaxis_title="Business Line", height=300,
-            margin=dict(t=20, l=120, r=30, b=50),
+            fig_hm, title="Adoption heatmap", xaxis_title=None,
+            yaxis_title=None, height=110 + 52 * len(pivot.index),
+            hovermode="closest", margin=dict(t=16, l=8, r=24, b=40),
         )
-        st.plotly_chart(fig_hm, width="stretch",
-                        config={"displaylogo": False})
+        fig_hm.update_xaxes(showspikes=False, showline=False, ticks="",
+                            type="category")
+        fig_hm.update_yaxes(showgrid=False, automargin=True, showspikes=False)
+        show_chart(fig_hm)
 
     # ---- Materials on Statistical Forecast (interactive table) -------------
-    st.markdown("### 📋 Materials on Statistical Forecast")
+    st.markdown("### Materials on the statistical forecast")
     st.caption(
-        "Granular Business Line + Material + Ship To Sub Region + Active "
-        "Status combinations on the Statistical Forecast (Review Req = No and "
-        "Active/Sparse), with forecast volume per fiscal year (active year "
-        "onwards) and each combination's share of its Ship To Sub Region's "
-        "total forecast. Reacts to the filters above."
+        "Each Business Line + Material + Ship To Sub Region + Active Status "
+        "combination on the statistical forecast, with its forecast volume per "
+        "fiscal year and its share of its region's total forecast."
     )
     mat_table = stat_adoption_material_table(filtered, active_year=active_year)
     if mat_table.empty:
@@ -3658,7 +3978,7 @@ def render_stat_adoption_tab(long_df: pd.DataFrame) -> None:
                              width="stretch", hide_index=True, height=420)
         csv = mat_table.to_csv(index=False)
         st.download_button(
-            "⬇️ Download materials on Statistical Forecast (CSV)",
+            "Download materials on Statistical Forecast (CSV)",
             data=csv, file_name="materials_on_stat_forecast.csv",
             mime="text/csv", key="adopt::dl",
         )
@@ -3677,59 +3997,59 @@ def main() -> None:
         render_login_screen()
         return  # unreachable (render_login_screen calls st.stop), kept for clarity
 
-    # ---- Signed-in header ---------------------------------------------------
+    # ---- Header -----------------------------------------------------------------
     auth_user = st.session_state.get("auth_user", "")
     display_name = USER_DISPLAY_NAMES.get(auth_user, auth_user.capitalize())
-    head_l, head_r = st.columns([8, 2])
+    head_l, head_r = st.columns([6, 1], vertical_alignment="top")
     with head_l:
-        st.title("📊 Forecast vs Actuals — Interactive Dashboard")
-        st.caption(f"👤 Signed in as **{display_name}**")
+        st.markdown('<div class="fva-header-title">Forecast vs Actuals</div>',
+                    unsafe_allow_html=True)
+        sub_slot = st.empty()
+        cycle_slot = st.empty()
     with head_r:
-        st.write("")  # vertical spacing to align the button with the title
-        if st.button("🚪 Log out", key="auth::logout", width="stretch"):
+        if st.button("Log out", key="auth::logout", width="stretch"):
             logout()
 
     if "current_file_id" not in st.session_state:
         st.session_state["current_file_id"] = None
 
-    uploaded = st.file_uploader(
-        "Upload the **Forecast vs Actuals** input Excel file (.xlsx)",
-        type=["xlsx"], accept_multiple_files=False,
-        help="The file name typically ends with the reporting month, "
-             "e.g. 'Forecast_vs_Actuals_Cleaning_and_Personal_Care_April.xlsx'.",
-    )
+    has_file = st.session_state["current_file_id"] is not None
+    file_label = ("Data file" if not has_file else
+                  f"Data file: {st.session_state['current_file_id'].split('::')[0]}")
+    with st.expander(file_label, expanded=not has_file):
+        uploaded = st.file_uploader(
+            "Upload the Arkieva Forecast vs Actuals export (.xlsx)",
+            type=["xlsx"], accept_multiple_files=False,
+            help="Upload the raw export as downloaded from Arkieva; the data "
+                 "is read from the first sheet. Replace it here at any time.",
+        )
 
     if uploaded is None:
         if st.session_state["current_file_id"] is not None:
             st.session_state["current_file_id"] = None
             reset_app_state()
-        st.info(
-            "👆 Drag-and-drop or browse to upload the Forecast vs Actuals "
-            "Excel file to get started."
-        )
+        sub_slot.markdown(
+            f'<div class="fva-header-sub">Signed in as {display_name}</div>',
+            unsafe_allow_html=True)
         st.markdown(
-            "**This dashboard provides:**\n"
-            "1. An **Anomaly Summary** that ranks the top anomalies per Ship "
-            "To Sub Region, assigns each a reason code (trend reversal, trend "
-            "mismatch, seasonality loss, IQR outliers), and lets you drill "
-            "down to the root cause and recommended next steps.\n"
-            "2. An **STF Variation & Exceptions** view comparing the current "
-            "Statistical Forecast Committed against Lag 1 over M4-based "
-            "horizons, flagging top exception Keys, the months driving them, "
-            "and a waterfall of variation drivers.\n"
-            "3. An interactive replica of the *Forecast vs Actuals* pivot "
-            "chart with all original slicer filters on top — clearly "
-            "splitting **History** vs **Forecast** series, with optional "
-            "**trend lines** and an automatic trend interpretation.\n"
-            "4. An **outlier detection & correction** view (choose **IQR** or "
-            "**Sigma**) for the **Sales History** of every Key, producing a "
-            "cleansed history alongside the original.\n"
-            "5. A **year-over-year seasonality** view comparing the forecast's "
-            "seasonal shape against the last 3 historical years, with an "
-            "automatic interpretation of forecast quality.\n"
-            "6. A **Statistical Forecast Adoption %** view showing the share "
-            "of volume on statistical forecast by fiscal year, Business Line "
-            "and Ship To Sub Region, with the underlying materials table."
+            '<div class="fva-tab-intro" style="margin-top:1rem">'
+            "Upload this month's Arkieva <b>Forecast vs Actuals</b> export to "
+            "start the review. The dashboard then shows:</div>",
+            unsafe_allow_html=True)
+        st.markdown(
+            "- **Anomaly summary** — Keys whose forecast breaks from history "
+            "(trend, seasonality, outliers), ranked per Ship To Sub Region, "
+            "with root cause and next steps.\n"
+            "- **STF variation & exceptions** — where this cycle's committed "
+            "statistical forecast moved against the prior cycle, and why.\n"
+            "- **Forecast vs actuals** — history and forecast lines for any "
+            "slice, with trend lines.\n"
+            "- **Outliers** — IQR or Sigma detection on Sales History, with a "
+            "cleansed history to export.\n"
+            "- **Seasonality (YoY)** — the forecast's seasonal shape against "
+            "the last three years.\n"
+            "- **Stat forecast adoption** — share of forecast volume running "
+            "on the statistical forecast, by year, Business Line and region."
         )
         st.stop()
 
@@ -3737,28 +4057,58 @@ def main() -> None:
     if st.session_state["current_file_id"] != file_id:
         reset_app_state()
         st.session_state["current_file_id"] = file_id
+        st.rerun()  # redraw the header with the file collapsed and named
 
     file_bytes = uploaded.getvalue()
     try:
-        long_df, all_months = load_excel(file_bytes, uploaded.name)
+        with st.spinner("Reading the export…"):
+            long_df, all_months = load_excel(file_bytes, uploaded.name)
     except ValueError as exc:
-        st.error(f"❌ {exc}")
+        st.error(str(exc))
         st.stop()
     except Exception as exc:  # noqa: BLE001
-        st.error(f"❌ Unexpected error while loading the file: {exc}")
+        st.error(f"The file couldn't be read: {exc}. Check that it is the raw "
+                 "Arkieva Forecast vs Actuals export and upload it again.")
         st.stop()
 
     if long_df.empty:
-        st.error("The uploaded file contains no usable rows.")
+        st.error("The uploaded file has no data rows. Export it again from "
+                 "Arkieva and upload the new file.")
         st.stop()
 
+    # ---- Planning-cycle readout (what every tab is anchored to) ---------------
+    boundary = history_forecast_boundary(long_df)
+    m4 = stf_m4_month(long_df)
+    reporting = extract_month_from_filename(uploaded.name)
+    sub_bits = [f"Signed in as {display_name}",
+                f"{long_df['Key'].nunique():,} Keys"]
+    if reporting:
+        sub_bits.append(f"reporting month {reporting}")
+    sub_slot.markdown(f'<div class="fva-header-sub">{" | ".join(sub_bits)}</div>',
+                      unsafe_allow_html=True)
+    cells = []
+    if boundary is not None:
+        cells.append(("Last actual month", pd.Timestamp(boundary).strftime("%b %Y"), ""))
+    if m4 is not None:
+        cells.append(("Variation horizon starts (M4)", pd.Timestamp(m4).strftime("%b %Y"), "fcst"))
+    if all_months:
+        cells.append(("Forecast runs to", pd.Timestamp(all_months[-1]).strftime("%b %Y"), "fcst"))
+        cells.append(("History shown from", pd.Timestamp(all_months[0]).strftime("%b %Y"), ""))
+    if cells:
+        cycle_slot.markdown(
+            '<div class="fva-cycle">' + "".join(
+                f'<div class="{cls}"><span class="lbl">{lbl}</span>'
+                f'<span class="val">{val}</span></div>'
+                for lbl, val, cls in cells) + "</div>",
+            unsafe_allow_html=True)
+
     tab0, tab_stf, tab1, tab2, tab3, tab4 = st.tabs([
-        "🧭 Anomaly Summary",
-        "📊 STF Variation & Exceptions",
-        "📈 Forecast vs Actuals",
-        "🚨 Outlier Detection & Correction",
-        "📅 Seasonality (YoY)",
-        "📦 Statistical Forecast Adoption %",
+        "Anomaly summary",
+        "STF variation & exceptions",
+        "Forecast vs actuals",
+        "Outliers",
+        "Seasonality (YoY)",
+        "Stat forecast adoption",
     ])
     with tab0:
         render_anomaly_tab(long_df)

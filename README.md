@@ -40,18 +40,38 @@ recently uploaded file — no manual preparation needed.
 > upgrade to a private repo on a paid workspace. Share the actual
 > passwords with your users through a private channel — never commit
 > plaintext passwords or document them in this README.
+>
+> **Action recommended:** `app.py` lists the usernames and its comments
+> describe how the passwords are formed, so in a public repository every
+> password can be derived. Rotate the passwords to non-patterned ones and
+> move the hash table to Streamlit secrets.
 
-### Dark theme
-- The entire UI uses a **dark theme** — background, filters, dropdown
-  menus, the file uploader, buttons, tabs, metric cards and tables — with
-  high-contrast light text chosen for legibility. The theme is set both
-  via `.streamlit/config.toml` (so it applies from first paint) and via
-  in-app CSS for the widgets the config alone doesn't fully cover. All
-  Plotly charts use a matching dark canvas with light, legible labels.
-- **Fullscreen charts stay dark**: every chart uses a solid dark canvas
-  (equal to the page background), and the fullscreen overlay is styled
-  dark via CSS, so expanding any chart with the *Fullscreen* button keeps
-  the same dark theme instead of flashing a white background.
+### Look and feel
+- A calm dark theme built for long review sessions and screen sharing:
+  ink-slate page, quiet chart gridlines, one steel-blue accent for
+  interactive state, and IBM Plex Sans throughout. The font is
+  **self-hosted** in `static/fonts` (SIL Open Font License), so the app
+  never depends on Google Fonts, which corporate networks often block.
+- Theme colours, font, radii, table colours and callout tones live in
+  `.streamlit/config.toml`; `app.py` adds only a small stylesheet for the
+  header, tabs, filter panels and metric cards.
+- **Series colours mean the same thing on every tab**: Sales History blue,
+  History For Forecast aqua, Statistical Forecast orange, prior-cycle
+  statistical forecast violet, Final Demand Plan magenta. Trend lines wear
+  their series' colour, dashed. History uses circle markers and forecast
+  diamonds, so identity never relies on colour alone. The palette was
+  checked with a colour-blind-safety validator against the chart
+  background.
+- Every time chart marks the planning cycle the same way: a faint wash over
+  the forecast period and a labelled line at the last actual month. The
+  header shows the cycle at a glance: last actual month, M4, forecast end.
+- Monthly lines use straight segments (the old smoothed splines overshot
+  between months, e.g. dipping below zero at the boundary). A forecast line
+  that stops before the file's last month is left blank there instead of
+  plunging to zero.
+- Charts render through one helper (`show_chart`) with the app's own Plotly
+  template, so no Streamlit theme override or deprecation banner appears.
+  Fullscreen charts keep the dark canvas.
 
 ### Tab 1 — Anomaly Summary
 The **first tab** — a triage view for Demand Planners.
@@ -216,10 +236,14 @@ A faithful reproduction of the original Excel pivot dashboard:
     MAD, so the bounds aren't inflated by the very outliers being detected)
     and corrects each to the **mean**.
   Both corrections are statistically valid central estimates.
-- The per-Key chart shows the **original Sales History** and the
-  **cleansed history** (after correction) as solid lines, the threshold
-  band, outlier markers, and **History For Forecast (kg)** unchanged for
-  comparison.
+- **Detection uses actual history only** (months up to the last actual
+  month). The export carries Sales History as zeros for future months;
+  including them used to drag the quartiles and the median correction
+  toward zero. On the July 2026 export that produced about 4,000 spurious
+  flags (6,932 flagged vs 2,938 on history only).
+- The per-Key chart shows the original Sales History, the cleansed history
+  (dotted), the normal range between the method's bounds, outlier rings,
+  and History For Forecast unchanged for comparison.
 - A table of all corrected outliers and CSV exports of the cleansed
   history (per-Key and all-Keys).
 
@@ -410,7 +434,8 @@ Python 3.9 or newer is required. Streamlit prints a local URL (typically
 Follow these steps to put the app online for free.
 
 ### 1. Prepare the project folder
-Make a folder containing these files (note the `.streamlit` folder):
+Make a folder containing these files (note the `.streamlit` and `static`
+folders — both must be committed):
 
 ```
 forecast-vs-actuals/
@@ -418,8 +443,11 @@ forecast-vs-actuals/
 ├── requirements.txt
 ├── runtime.txt
 ├── README.md
-└── .streamlit/
-    └── config.toml
+├── .streamlit/
+│   └── config.toml          # MUST be inside .streamlit/ to take effect
+├── static/
+│   └── fonts/               # self-hosted IBM Plex Sans + licence
+└── tests/                   # optional, for local checks
 ```
 
 > Do **not** commit any customer Excel files — the app takes its input by
@@ -438,7 +466,7 @@ Using the command line (with Git installed):
 ```bash
 cd forecast-vs-actuals
 git init
-git add app.py requirements.txt runtime.txt README.md .streamlit/config.toml
+git add app.py requirements.txt runtime.txt README.md .streamlit/config.toml static tests
 git commit -m "Initial commit: Forecast vs Actuals dashboard"
 git branch -M main
 git remote add origin https://github.com/<your-username>/forecast-vs-actuals.git
@@ -487,6 +515,9 @@ Streamlit detects the push and rebuilds within a minute.
 | **`Failed to download and build pyarrow…` / `ModuleNotFoundError: pkg_resources` during install** | The cloud's Python had no prebuilt wheel for a pinned package, so pip tried to compile it from source and failed. This happens when Python is very new (e.g. **3.14**) and a pin predates its wheels. The current pins ship wheels for **Python 3.11–3.14**, so this shouldn't recur. If it does, either (a) set the **Python version to 3.12** in *App → Settings → Advanced* (most reliable), or (b) bump the offending package to a version that has a wheel for the cloud's Python. |
 | **`StreamlitAPIException` from a table (e.g. the Outlier tab's "All flagged & corrected outliers")** | pandas' Styler can only render `styler.render.max_elements` cells (262,144 by default); a wide filter selection can push the outlier listing past it (e.g. 29,594 rows × 12 cols = 355,128 cells). The app now renders large tables **without** a Styler — values stay numeric and formatting comes from `column_config`, which is Arrow-based and virtualised, so any row count works. Small tables still use the Styler, so their look (incl. highlighting) is unchanged. Note: raising `styler.render.max_elements` is **not** a good fix — Styler is extremely slow at that size. |
 | **Cloud is on the wrong Python version** | `runtime.txt` (`python-3.12`) requests 3.12, but the **Advanced settings dropdown at deploy time takes precedence** on the current cloud — set it there. The pinned requirements work on 3.12 **and** 3.14 regardless. |
+| **Filters clear themselves after a selection** | Fixed. Streamlit treats a widget whose option list changes as a new widget and drops its value; cascading filters change each other's option lists on every click. Each filter now keeps its choice in a separate store and is re-seeded from it on every run (see *How filters cascade*). `tests/test_app_filters.py` reproduces the old failure and guards against it. |
+| **Dark theme missing / white tables on Streamlit Cloud** | `config.toml` must be at `.streamlit/config.toml`. A copy at the repo root is ignored by Streamlit. |
+| **Yellow "keyword arguments have been deprecated" banners above charts** | Fixed: Streamlit 1.50's `st.plotly_chart` has no `width` argument, so passing it triggered the banner. Charts now go through `show_chart`, which passes the right arguments for the installed version. |
 | `use_container_width will be removed…` warning | This deprecated arg has been replaced throughout with the current `width="stretch"` API, so the warning no longer appears. |
 
 > **Dependency pinning:** the app pins compatible-release (`~=`) versions so
@@ -501,15 +532,39 @@ Streamlit detects the push and rebuilds within a minute.
 ```
 .
 ├── app.py                    # Streamlit application
-├── requirements.txt          # Pinned dependency versions (tested, no segfault)
+├── requirements.txt          # Pinned dependency versions (tested)
 ├── runtime.txt               # Preferred Python version (3.12) for the cloud
 ├── README.md
-└── .streamlit/
-    └── config.toml           # Dark theme + max upload size
+├── .streamlit/
+│   └── config.toml           # Theme, self-hosted font, upload size
+├── static/fonts/             # IBM Plex Sans (woff2) + OFL licence
+└── tests/
+    ├── test_app_filters.py   # End-to-end filter tests on the real app
+    ├── app_harness.py        # Runs app.main() under Streamlit's test runtime
+    └── fixture.py            # Synthetic Arkieva-format workbook generator
 ```
 
-> Commit the `.streamlit/config.toml` file too — it is what makes the
-> deployed app dark-themed from the first paint.
+---
+
+## Testing
+
+`tests/test_app_filters.py` drives the **real app** through Streamlit's own
+test runtime (`streamlit.testing`), clicking filters on every tab. It checks
+defaults, that selections persist while other filters cascade and across
+reruns, that each filter narrows the others but not itself, that tabs filter
+independently, that Reset restores defaults on one tab only, that the Key
+pickers and the STF horizon keep their choice, and that no exception occurs.
+
+```bash
+python tests/test_app_filters.py                    # synthetic workbook
+python tests/test_app_filters.py path/to/export.xlsx  # a real Arkieva export
+```
+
+Release checks for this version (October 2026): 45/45 on the synthetic
+workbook and on the July 2026 export, 44/44 on the legacy April export
+(which has no prior-cycle line); a real-browser run with real sign-in and
+upload, 16/16; and five simultaneous signed-in browser sessions filtering
+different tabs with no cross-session interference.
 
 ---
 
@@ -517,20 +572,33 @@ Streamlit detects the push and rebuilds within a minute.
 
 The filters behave like Excel slicers:
 
-- **Cascading:** selecting values in one filter narrows the options shown in
-  every *other* filter, while the active filter itself still lists all values
-  consistent with the others (a filter never narrows its own options).
-- **Selections persist.** Your choices stay put across reruns, chart
-  interactions, and tab switches — each multiselect owns its state and the app
-  never overwrites a live selection. Values you've picked are always kept in
-  the option list, so nothing is silently dropped when the cascade would
-  otherwise exclude them; clearing a value is always your decision.
-- **Independent per tab.** Each tab keeps its own filter state (via a unique
-  key prefix), so filtering on one tab doesn't disturb another.
-- **Defaults once.** *Arkieva Active Status* defaults to **Active + Sparse**
-  on a tab's first render; afterwards your choices (including clearing it) are
-  respected. The 🔄 **Reset filters** button restores the defaults and clears
-  every other selection on that tab.
+- **Cascading:** choosing values in one filter narrows the options in every
+  *other* filter; a filter never narrows its own list. The placeholder says
+  how many values remain (e.g. "4 of 12 available").
+- **Selections persist** across reruns, chart interactions and tab switches,
+  and a value you picked stays in its list even if another filter would now
+  exclude it, so nothing disappears without you removing it. The line under
+  the filters summarises what is applied.
+- **Independent per tab:** each tab keeps its own filters.
+- **Defaults once:** Arkieva Active Status starts at Active + Sparse on the
+  tabs that use that default; after that your choices, including clearing
+  it, are respected. **Reset filters** restores that tab's defaults only.
+- **Fast:** options are computed on a small cached table of the unique filter
+  combinations (about 3,400 rows) rather than the full 1M-row table, and each
+  tab runs as a Streamlit *fragment*, so a filter click reruns only that tab
+  (about 0.6 s in testing, versus about 9 s for a full-app rerun before).
+
+**Why they used to reset.** Streamlit identifies a widget by its key plus
+some of its parameters; for a multiselect the option list is one of them.
+A cascading filter changes the other filters' option lists on every click,
+so Streamlit treated those filters as new widgets and discarded their
+selections. Now every data-dependent widget stores its value under a
+separate key that Streamlit never discards; an `on_change` callback copies
+the user's choice there, and each run re-seeds the widget from it before
+creating it. The Key pickers and STF horizon controls use the same pattern.
+(The range slider is the exception: it receives the remembered range as its
+`value`, because seeding a range into a select_slider crashes the browser
+component in Streamlit 1.50.)
 
 ## Sessions and multiple users
 
